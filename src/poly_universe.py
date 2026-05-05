@@ -32,13 +32,8 @@ import aiohttp
 log = logging.getLogger(__name__)
 
 GAMMA_API = "https://gamma-api.polymarket.com/markets"
-<<<<<<< HEAD
-# Match BTC/Bitcoin up-or-down question text (hourly, daily, 5-min formats)
-SLUG_RE = re.compile(r"(?:bitcoin|btc) up or down", re.I)
-=======
 # Match all BTC/Bitcoin Up/Down formats: "BTC Up or Down 5m", "Bitcoin Up or Down - ...", etc.
 SLUG_RE = re.compile(r"(?:bitcoin|btc)\s+(?:up or down|up-or-down)", re.I)
->>>>>>> 8d3d2af67ba84d598cc9770cadcbc05aeef3fc1a
 # Extract a dollar price from question text like "$94,500"
 PRICE_RE = re.compile(r"\$([\d,]+(?:\.\d+)?)")
 
