@@ -121,7 +121,11 @@ async def main(paper: bool, log_level: str = "INFO") -> None:
                 continue
 
             for market in markets:
+<<<<<<< HEAD
                 # Up/Down markets: use live Binance mid as reference strike
+=======
+                # Up/Down markets: use live Binance mid as the reference strike
+>>>>>>> 8d3d2af67ba84d598cc9770cadcbc05aeef3fc1a
                 if market.strike <= 0:
                     market.strike = binance_tick.mid
 
