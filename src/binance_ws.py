@@ -27,7 +27,7 @@ from .pricing import realized_vol_annual, SIGMA_MIN
 
 log = logging.getLogger(__name__)
 
-WS_BASE = "wss://stream.binance.com:9443/stream"
+WS_BASE = "wss://stream.binance.com:443/stream"
 VOL_WINDOW_SECS: float = 60.0   # rolling window for realized σ
 PING_INTERVAL: float = 20.0      # match Binance server cadence
 RECONNECT_BASE: float = 1.0
