@@ -22,7 +22,7 @@ from websockets.exceptions import ConnectionClosed
 
 log = logging.getLogger(__name__)
 
-WS_URL = "wss://ws.clob.polymarket.com"
+WS_URL = "wss://ws-subscriptions-clob.polymarket.com"
 HEARTBEAT_INTERVAL = 10.0
 RECONNECT_BASE = 1.0
 RECONNECT_MAX = 30.0
