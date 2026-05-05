@@ -33,7 +33,7 @@ log = logging.getLogger(__name__)
 
 GAMMA_API = "https://gamma-api.polymarket.com/markets"
 # Match BTC/Bitcoin up-or-down question text (hourly, daily, 5-min formats)
-SLUG_RE = re.compile(r"bitcoin.*(?:up or down|up-or-down|higher|lower)|btc.*(?:up or down|up-or-down)", re.I)
+SLUG_RE = re.compile(r"(?:bitcoin|btc) up or down", re.I)
 # Extract a dollar price from question text like "$94,500"
 PRICE_RE = re.compile(r"\$([\d,]+(?:\.\d+)?)")
 
