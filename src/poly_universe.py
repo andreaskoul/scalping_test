@@ -99,19 +99,17 @@ async def fetch_active_markets(
 ) -> list[PolyMarket]:
     """Return active BTC Up/Down markets expiring within the window."""
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    params = {
-        "active": "true",
-        "closed": "false",
-        "limit": "500",
-        "end_date_min": now_iso,
-        "order": "endDate",
-        "ascending": "true",
-    }
+    # Build URL manually — aiohttp encodes colons in datetimes which breaks the filter
+    url = (
+        f"{GAMMA_API}?active=true&closed=false&limit=500"
+        f"&end_date_min={now_iso}&order=endDate&ascending=true"
+    )
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        async with session.get(GAMMA_API, params=params, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
             resp.raise_for_status()
-            markets_raw: list[dict] = await resp.json()
+            markets_raw: list[dict] = await resp.json(content_type=None)
+            log.info("Gamma raw response: %d items, type=%s", len(markets_raw) if isinstance(markets_raw, list) else -1, type(markets_raw).__name__)
     except Exception as exc:
         log.error("Gamma API fetch failed: %s", exc)
         return []
