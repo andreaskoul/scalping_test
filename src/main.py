@@ -121,9 +121,9 @@ async def main(paper: bool, log_level: str = "INFO") -> None:
                 continue
 
             for market in markets:
-                # Skip markets without a parseable strike
+                # Up/Down markets: use live Binance mid as the reference strike
                 if market.strike <= 0:
-                    continue
+                    market.strike = binance_tick.mid
 
                 yes_book = poly_ws.snapshot(market.yes_token_id)
                 if yes_book is None:

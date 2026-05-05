@@ -32,8 +32,8 @@ import aiohttp
 log = logging.getLogger(__name__)
 
 GAMMA_API = "https://gamma-api.polymarket.com/markets"
-# Match BTC/Bitcoin up-or-down question text (hourly, daily, 5-min formats)
-SLUG_RE = re.compile(r"bitcoin.*(?:up or down|up-or-down|higher|lower)|btc.*(?:up or down|up-or-down)", re.I)
+# Match all BTC/Bitcoin Up/Down formats: "BTC Up or Down 5m", "Bitcoin Up or Down - ...", etc.
+SLUG_RE = re.compile(r"(?:bitcoin|btc)\s+(?:up or down|up-or-down)", re.I)
 # Extract a dollar price from question text like "$94,500"
 PRICE_RE = re.compile(r"\$([\d,]+(?:\.\d+)?)")
 
@@ -132,6 +132,8 @@ async def fetch_active_markets(
         if not yes_id or not no_id:
             continue
 
+        # Up/Down markets don't embed a strike price in the question text.
+        # strike=0.0 signals to the caller to use the live Binance mid as K.
         strike = _parse_strike(question)
         result.append(
             PolyMarket(
