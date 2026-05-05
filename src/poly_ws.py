@@ -1,7 +1,7 @@
 """
 Polymarket CLOB WebSocket client.
 
-Connects to wss://ws.clob.polymarket.com and subscribes to the
+Connects to wss://ws-subscriptions-clob.polymarket.com and subscribes to the
 'market' channel for real-time book updates on a set of token_ids.
 
 The 'user' channel (order fills) is subscribed separately and requires
@@ -22,7 +22,7 @@ from websockets.exceptions import ConnectionClosed
 
 log = logging.getLogger(__name__)
 
-WS_URL = "wss://ws.clob.polymarket.com"
+WS_URL = "wss://ws-subscriptions-clob.polymarket.com"
 HEARTBEAT_INTERVAL = 10.0
 RECONNECT_BASE = 1.0
 RECONNECT_MAX = 30.0
