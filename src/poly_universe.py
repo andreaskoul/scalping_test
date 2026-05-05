@@ -109,7 +109,11 @@ async def fetch_active_markets(
         async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
             resp.raise_for_status()
             markets_raw: list[dict] = await resp.json(content_type=None)
-            log.info("Gamma raw response: %d items, type=%s", len(markets_raw) if isinstance(markets_raw, list) else -1, type(markets_raw).__name__)
+            log.info("Gamma raw response: %d items", len(markets_raw))
+            if markets_raw:
+                first = markets_raw[0]
+                log.info("First item keys: %s", list(first.keys())[:10])
+                log.info("First question: %r", first.get("question",""))[:80]
     except Exception as exc:
         log.error("Gamma API fetch failed: %s", exc)
         return []
