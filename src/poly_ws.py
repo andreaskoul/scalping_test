@@ -1,14 +1,9 @@
 """
 Polymarket CLOB book poller (REST-based).
 
-<<<<<<< HEAD
-Connects to wss://ws-subscriptions-clob.polymarket.com and subscribes to the
-'market' channel for real-time book updates on a set of token_ids.
-=======
 Polls https://clob.polymarket.com/book?token_id=<id> every POLL_INTERVAL_SECS
 for each tracked token. This is more reliable than the WebSocket endpoint
 for development and paper-trading.
->>>>>>> 4f5c3882a968876bb5cb376913e17c4916a47ecf
 
 Switch to the WS implementation for production co-located deployments
 where sub-second latency matters.
@@ -23,22 +18,9 @@ import aiohttp
 
 log = logging.getLogger(__name__)
 
-<<<<<<< HEAD
-WS_URL = "wss://ws-subscriptions-clob.polymarket.com"
-HEARTBEAT_INTERVAL = 10.0
-RECONNECT_BASE = 1.0
-RECONNECT_MAX = 30.0
-
-
-@dataclass
-class BookLevel:
-    price: float
-    size: float
-=======
 CLOB_REST = "https://clob.polymarket.com"
 POLL_INTERVAL_SECS: float = 0.5
 REQUEST_TIMEOUT: float = 3.0
->>>>>>> 4f5c3882a968876bb5cb376913e17c4916a47ecf
 
 
 @dataclass
@@ -54,7 +36,7 @@ class BookSnapshot:
 class PolyWS:
     """Polls Polymarket CLOB REST book endpoint for a set of token_ids.
 
-    Named PolyWS to keep the interface identical to the WS version —
+    Named PolyWS to keep the interface identical to the WS version --
     drop-in replacement, no changes needed in signal.py or main.py.
     """
 
