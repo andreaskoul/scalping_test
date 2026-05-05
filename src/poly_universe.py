@@ -103,16 +103,18 @@ async def fetch_active_markets(
     max_time_to_expiry_secs: float = 86400.0,
 ) -> list[PolyMarket]:
     """Return active BTC Up/Down markets expiring within the window."""
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     params = {
         "active": "true",
         "closed": "false",
         "limit": "500",
+        "end_date_min": now_iso,
         "order": "endDate",
         "ascending": "true",
-        "tag_slug": "crypto",
     }
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        async with session.get(GAMMA_API, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        async with session.get(GAMMA_API, params=params, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
             resp.raise_for_status()
             markets_raw: list[dict] = await resp.json()
     except Exception as exc:
