@@ -32,8 +32,8 @@ import aiohttp
 log = logging.getLogger(__name__)
 
 GAMMA_API = "https://gamma-api.polymarket.com/markets"
-# Match "Will Bitcoin" + "up or down" slug pattern (case-insensitive)
-SLUG_RE = re.compile(r"bitcoin.*(?:up or down|up-or-down|higher|lower)", re.I)
+# Match BTC/Bitcoin up-or-down question text (hourly, daily, 5-min formats)
+SLUG_RE = re.compile(r"bitcoin.*(?:up or down|up-or-down|higher|lower)|btc.*(?:up or down|up-or-down)", re.I)
 # Extract a dollar price from question text like "$94,500"
 PRICE_RE = re.compile(r"\$([\d,]+(?:\.\d+)?)")
 
@@ -94,16 +94,17 @@ def _token_ids(tokens: list[dict]) -> tuple[str, str, float, float]:
 
 async def fetch_active_markets(
     session: aiohttp.ClientSession,
-    min_time_to_expiry_secs: float = 120.0,
-    max_time_to_expiry_secs: float = 7200.0,
+    min_time_to_expiry_secs: float = 60.0,
+    max_time_to_expiry_secs: float = 86400.0,
 ) -> list[PolyMarket]:
     """Return active BTC Up/Down markets expiring within the window."""
     params = {
         "active": "true",
         "closed": "false",
-        "limit": "100",
+        "limit": "500",
         "order": "endDate",
         "ascending": "true",
+        "tag_slug": "crypto",
     }
     try:
         async with session.get(GAMMA_API, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
