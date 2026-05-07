@@ -153,6 +153,8 @@ async def fetch_active_markets(
             if not expiry_ts:
                 continue
             tte = expiry_ts - now
+            log.info("SLUG match: %r  tte=%.0fs  endDate=%s",
+                     question[:70], tte, m.get("endDate", ""))
             if not (min_time_to_expiry_secs <= tte <= max_time_to_expiry_secs):
                 continue
             tokens = m.get("tokens") or []
