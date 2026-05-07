@@ -113,10 +113,15 @@ async def fetch_active_markets(
     pages_fetched = 0
 
     while offset < 5000:
-        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        now_ts = time.time()
+        # Use start_date_min 4 hours ago — skips the large backlog of
+        # expired-but-unsettled markets while keeping all live windows.
+        start_min = datetime.fromtimestamp(now_ts - 4 * 3600, tz=timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
         url = (
             f"{GAMMA_API}?active=true&closed=false&limit=500"
-            f"&end_date_min={now_iso}&offset={offset}&order=endDate&ascending=true"
+            f"&start_date_min={start_min}&offset={offset}&order=endDate&ascending=true"
         )
         try:
             async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
