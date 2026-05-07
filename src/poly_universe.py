@@ -138,32 +138,18 @@ async def fetch_active_markets(
         pages_fetched += 1
 
         now = time.time()
-        if pages_fetched == 1:
-            sample = [m.get("question", "")[:80] for m in batch[:5]]
-            log.info("Gamma page 1 sample: %s", sample)
-            crypto_qs = [m.get("question", "") for m in batch
-                         if any(k in m.get("question", "").lower()
-                                for k in ("bitcoin", "btc", "ethereum", "eth"))]
-            log.info("Crypto questions in page 1: %d — %s",
-                     len(crypto_qs), [q[:60] for q in crypto_qs[:5]])
-
         for m in batch:
             question = m.get("question", "")
             if not SLUG_RE.search(question):
                 continue
-            ed = m.get("endDate")
-            expiry_ts = _parse_expiry(ed)
-            tte = (expiry_ts - now) if expiry_ts else float("nan")
-            tokens = m.get("tokens") or []
-            yes_id, no_id, yes_price, no_price = _token_ids(tokens)
-            log.info("SLUG %r  tte=%.0f  endDate=%s  tok=%d  y=%s  n=%s",
-                     question[:55], tte, ed, len(tokens),
-                     yes_id[:8] if yes_id else "NONE",
-                     no_id[:8] if no_id else "NONE")
+            expiry_ts = _parse_expiry(m.get("endDate"))
             if not expiry_ts:
                 continue
+            tte = expiry_ts - now
             if not (min_time_to_expiry_secs <= tte <= max_time_to_expiry_secs):
                 continue
+            tokens = m.get("tokens") or []
+            yes_id, no_id, yes_price, no_price = _token_ids(tokens)
             if not yes_id or not no_id:
                 continue
             strike = _parse_strike(question)
@@ -194,5 +180,12 @@ async def fetch_active_markets(
 
         offset += len(batch)
 
-    log.info("Universe: %d tradeable BTC Up/Down markets (%d page(s))", len(result), pages_fetched)
+    if result:
+        log.info("Universe: %d tradeable BTC/ETH Up/Down markets (%d page(s))", len(result), pages_fetched)
+    else:
+        log.info(
+            "Universe: 0 markets (%d page(s)) — BTC/ETH Up/Down windows run ~08:00–13:00 UTC; "
+            "pre-listed tomorrow markets exist but have no tokens yet",
+            pages_fetched,
+        )
     return result
