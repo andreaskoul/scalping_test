@@ -131,6 +131,15 @@ async def fetch_active_markets(
         pages_fetched += 1
 
         now = time.time()
+        if pages_fetched == 1:
+            sample = [m.get("question", "")[:80] for m in batch[:5]]
+            log.info("Gamma page 1 sample: %s", sample)
+            crypto_qs = [m.get("question", "") for m in batch
+                         if any(k in m.get("question", "").lower()
+                                for k in ("bitcoin", "btc", "ethereum", "eth"))]
+            log.info("Crypto questions in page 1: %d — %s",
+                     len(crypto_qs), [q[:60] for q in crypto_qs[:5]])
+
         for m in batch:
             question = m.get("question", "")
             if not SLUG_RE.search(question):
