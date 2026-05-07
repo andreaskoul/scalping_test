@@ -131,7 +131,7 @@ async def fetch_active_markets(
         if not (min_time_to_expiry_secs <= tte <= max_time_to_expiry_secs):
             continue
 
-        tokens = m.get("tokens", [])
+        tokens = m.get("tokens") or []
         yes_id, no_id, yes_price, no_price = _token_ids(tokens)
         if not yes_id or not no_id:
             continue
