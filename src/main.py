@@ -31,7 +31,7 @@ from .signal import SignalGenerator
 
 log = logging.getLogger(__name__)
 
-UNIVERSE_REFRESH_SECS = 120.0   # re-poll Gamma API for new markets
+UNIVERSE_REFRESH_SECS = 30.0    # re-poll Gamma API for new markets
 EVAL_INTERVAL_SECS = 0.05       # main loop tick (20 Hz)
 
 
