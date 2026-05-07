@@ -50,7 +50,7 @@ async def main(paper: bool, log_level: str = "INFO") -> None:
     if not paper and not private_key:
         raise SystemExit("POLY_PRIVATE_KEY must be set in .env for live mode")
 
-    symbols = os.getenv("BINANCE_SYMBOLS", "btcusdt").split(",")
+    symbols = os.getenv("BINANCE_SYMBOLS", "btcusdt,ethusdt").split(",")
     max_notional = float(os.getenv("MAX_NOTIONAL_PER_TRADE", "25"))
     max_per_min = float(os.getenv("MAX_NOTIONAL_PER_MINUTE", "200"))
     drawdown_stop = float(os.getenv("DAILY_DRAWDOWN_STOP", "500"))
@@ -110,17 +110,14 @@ async def main(paper: bool, log_level: str = "INFO") -> None:
                 last_refresh = now
                 log.info("Universe refreshed: %d markets", len(markets))
 
-            # Only BTC is in scope for v1
-            btc = binance_clients.get("btcusdt")
-            if btc is None:
-                await asyncio.sleep(EVAL_INTERVAL_SECS)
-                continue
-            binance_tick = btc.snapshot()
-            if binance_tick is None:
-                await asyncio.sleep(EVAL_INTERVAL_SECS)
-                continue
-
             for market in markets:
+                binance_client = binance_clients.get(market.symbol)
+                if binance_client is None:
+                    continue
+                binance_tick = binance_client.snapshot()
+                if binance_tick is None:
+                    continue
+
                 # Up/Down markets: use live Binance mid as the reference strike
                 if market.strike <= 0:
                     market.strike = binance_tick.mid
