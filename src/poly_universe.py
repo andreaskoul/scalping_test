@@ -113,7 +113,7 @@ async def fetch_active_markets(
             if markets_raw:
                 first = markets_raw[0]
                 log.info("First item keys: %s", list(first.keys())[:10])
-                log.info("First question: %r", first.get("question",""))[:80]
+                log.info("First question: %r", first.get("question","")[:80])
     except Exception as exc:
         log.error("Gamma API fetch failed: %s", exc)
         return []
