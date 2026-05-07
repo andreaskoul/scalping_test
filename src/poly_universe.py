@@ -66,10 +66,12 @@ def _parse_strike(question: str) -> float:
         return 0.0
 
 
-def _parse_expiry(end_date: str) -> float:
+def _parse_expiry(end_date) -> float:
     """Parse ISO8601 endDate to UTC unix timestamp."""
+    if not end_date:
+        return 0.0
     try:
-        dt = datetime.fromisoformat(end_date.rstrip("Z")).replace(
+        dt = datetime.fromisoformat(str(end_date).rstrip("Z")).replace(
             tzinfo=timezone.utc
         )
         return dt.timestamp()
@@ -149,16 +151,19 @@ async def fetch_active_markets(
             question = m.get("question", "")
             if not SLUG_RE.search(question):
                 continue
-            expiry_ts = _parse_expiry(m.get("endDate", ""))
-            if not expiry_ts:
-                continue
-            tte = expiry_ts - now
-            log.info("SLUG match: %r  tte=%.0fs  endDate=%s",
-                     question[:70], tte, m.get("endDate", ""))
-            if not (min_time_to_expiry_secs <= tte <= max_time_to_expiry_secs):
-                continue
+            ed = m.get("endDate")
+            expiry_ts = _parse_expiry(ed)
+            tte = (expiry_ts - now) if expiry_ts else float("nan")
             tokens = m.get("tokens") or []
             yes_id, no_id, yes_price, no_price = _token_ids(tokens)
+            log.info("SLUG %r  tte=%.0f  endDate=%s  tok=%d  y=%s  n=%s",
+                     question[:55], tte, ed, len(tokens),
+                     yes_id[:8] if yes_id else "NONE",
+                     no_id[:8] if no_id else "NONE")
+            if not expiry_ts:
+                continue
+            if not (min_time_to_expiry_secs <= tte <= max_time_to_expiry_secs):
+                continue
             if not yes_id or not no_id:
                 continue
             strike = _parse_strike(question)
