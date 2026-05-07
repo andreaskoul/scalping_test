@@ -33,7 +33,9 @@ log = logging.getLogger(__name__)
 
 GAMMA_API = "https://gamma-api.polymarket.com/markets"
 # Match all BTC/Bitcoin Up/Down formats: "BTC Up or Down 5m", "Bitcoin Up or Down - ...", etc.
-SLUG_RE = re.compile(r"(?:bitcoin|btc)\s+(?:up or down|up-or-down)", re.I)
+SLUG_RE = re.compile(r"(?:bitcoin|btc|ethereum|eth)\s+(?:up or down|up-or-down)", re.I)
+BTC_RE = re.compile(r"(?:bitcoin|btc)", re.I)
+ETH_RE = re.compile(r"(?:ethereum|eth)", re.I)
 # Extract a dollar price from question text like "$94,500"
 PRICE_RE = re.compile(r"\$([\d,]+(?:\.\d+)?)")
 
@@ -46,9 +48,10 @@ class PolyMarket:
     no_token_id: str    # "Down" token
     yes_price: float    # current mid on Polymarket
     no_price: float
-    strike: float       # reference BTC price (parsed from question text)
+    strike: float       # reference price (parsed from question text)
     expiry_ts: float    # UTC unix timestamp
     tick_size: float    # from API; default 0.01
+    symbol: str = "btcusdt"  # Binance feed to use
 
 
 def _parse_strike(question: str) -> float:
@@ -97,61 +100,77 @@ async def fetch_active_markets(
     min_time_to_expiry_secs: float = 60.0,
     max_time_to_expiry_secs: float = 86400.0,
 ) -> list[PolyMarket]:
-    """Return active BTC Up/Down markets expiring within the window."""
-    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    # Build URL manually — aiohttp encodes colons in datetimes which breaks the filter
-    url = (
-        f"{GAMMA_API}?active=true&closed=false&limit=500"
-        f"&end_date_min={now_iso}&order=endDate&ascending=true"
-    )
+    """Return active BTC Up/Down markets expiring within the window.
+
+    Paginates through the Gamma API (sorted ascending by endDate) because
+    many already-expired-but-unsettled markets sit at the front of the list
+    and push live markets past the first page.  Stops as soon as the last
+    item in a page expires beyond max_time_to_expiry_secs.
+    """
     headers = {"User-Agent": "Mozilla/5.0"}
-    try:
-        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-            resp.raise_for_status()
-            markets_raw: list[dict] = await resp.json(content_type=None)
-            log.info("Gamma raw response: %d items", len(markets_raw))
-            if markets_raw:
-                first = markets_raw[0]
-                log.info("First item keys: %s", list(first.keys())[:10])
-                log.info("First question: %r", first.get("question","")[:80])
-    except Exception as exc:
-        log.error("Gamma API fetch failed: %s", exc)
-        return []
-
-    now = time.time()
     result: list[PolyMarket] = []
-    for m in markets_raw:
-        question = m.get("question", "")
-        if not SLUG_RE.search(question):
-            continue
-        expiry_ts = _parse_expiry(m.get("endDate", ""))
-        if expiry_ts == 0:
-            continue
-        tte = expiry_ts - now
-        if not (min_time_to_expiry_secs <= tte <= max_time_to_expiry_secs):
-            continue
+    offset = 0
+    pages_fetched = 0
 
-        tokens = m.get("tokens") or []
-        yes_id, no_id, yes_price, no_price = _token_ids(tokens)
-        if not yes_id or not no_id:
-            continue
-
-        # Up/Down markets don't embed a strike price in the question text.
-        # strike=0.0 signals to the caller to use the live Binance mid as K.
-        strike = _parse_strike(question)
-        result.append(
-            PolyMarket(
-                condition_id=m.get("conditionId", m.get("id", "")),
-                question=question,
-                yes_token_id=yes_id,
-                no_token_id=no_id,
-                yes_price=yes_price,
-                no_price=no_price,
-                strike=strike,
-                expiry_ts=expiry_ts,
-                tick_size=float(m.get("minimum_tick_size", 0.01)),
-            )
+    while offset < 5000:
+        url = (
+            f"{GAMMA_API}?active=true&closed=false&limit=500"
+            f"&offset={offset}&order=endDate&ascending=true"
         )
+        try:
+            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                resp.raise_for_status()
+                batch: list[dict] = await resp.json(content_type=None)
+        except Exception as exc:
+            log.error("Gamma API fetch failed at offset %d: %s", offset, exc)
+            break
 
-    log.info("Universe: %d tradeable BTC Up/Down markets", len(result))
+        if not batch:
+            break
+        pages_fetched += 1
+
+        now = time.time()
+        for m in batch:
+            question = m.get("question", "")
+            if not SLUG_RE.search(question):
+                continue
+            expiry_ts = _parse_expiry(m.get("endDate", ""))
+            if not expiry_ts:
+                continue
+            tte = expiry_ts - now
+            if not (min_time_to_expiry_secs <= tte <= max_time_to_expiry_secs):
+                continue
+            tokens = m.get("tokens") or []
+            yes_id, no_id, yes_price, no_price = _token_ids(tokens)
+            if not yes_id or not no_id:
+                continue
+            strike = _parse_strike(question)
+            symbol = "ethusdt" if ETH_RE.search(question) else "btcusdt"
+            result.append(
+                PolyMarket(
+                    condition_id=m.get("conditionId", m.get("id", "")),
+                    question=question,
+                    yes_token_id=yes_id,
+                    no_token_id=no_id,
+                    yes_price=yes_price,
+                    no_price=no_price,
+                    strike=strike,
+                    expiry_ts=expiry_ts,
+                    tick_size=float(m.get("minimum_tick_size") or 0.01),
+                    symbol=symbol,
+                )
+            )
+
+        # Once the last item in the page is past our max window, all
+        # subsequent pages will be too — stop paginating.
+        last_expiry = _parse_expiry(batch[-1].get("endDate", ""))
+        if last_expiry and (last_expiry - now) > max_time_to_expiry_secs:
+            break
+
+        if len(batch) < 500:
+            break  # final page
+
+        offset += len(batch)
+
+    log.info("Universe: %d tradeable BTC Up/Down markets (%d page(s))", len(result), pages_fetched)
     return result
