@@ -43,7 +43,7 @@ def _setup_logging(level: str = "INFO") -> None:
     )
 
 
-async def main(paper: bool, log_level: str = "INFO") -> None:
+async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0) -> None:
     _setup_logging(log_level)
 
     private_key = os.getenv("POLY_PRIVATE_KEY")
@@ -63,6 +63,8 @@ async def main(paper: bool, log_level: str = "INFO") -> None:
     log.info("=== Polymarket-vs-Binance arb bot starting [%s] ===", mode)
     log.info("Binance symbols: %s | safety_eps=%.4f cooldown=%.1fs notional<=%.0f",
              symbols, safety_eps, cooldown, max_notional)
+    if duration_secs > 0:
+        log.info("Will stop after %.0f seconds and print PnL summary.", duration_secs)
 
     # Components
     binance_clients = {sym: BinanceWS(sym, stale_threshold_secs=binance_stale) for sym in symbols}
@@ -94,6 +96,8 @@ async def main(paper: bool, log_level: str = "INFO") -> None:
     last_refresh = 0.0
     last_heartbeat = 0.0
     HEARTBEAT_SECS = 30.0
+    start_ts = time.time()
+    deadline = start_ts + duration_secs if duration_secs > 0 else 0.0
 
     async with aiohttp.ClientSession() as session:
         while True:
@@ -103,6 +107,9 @@ async def main(paper: bool, log_level: str = "INFO") -> None:
                 continue
 
             now = time.time()
+            if deadline and now >= deadline:
+                log.info("Duration reached (%.0fs). Shutting down.", duration_secs)
+                break
 
             # Refresh market universe periodically
             if now - last_refresh > UNIVERSE_REFRESH_SECS:
@@ -199,6 +206,12 @@ async def main(paper: bool, log_level: str = "INFO") -> None:
 
             await asyncio.sleep(EVAL_INTERVAL_SECS)
 
+    # Graceful shutdown — cancel background tasks, close DB, print PnL.
+    for t in tasks:
+        t.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    await executor.close()
+
 
 def cli() -> None:
     parser = argparse.ArgumentParser(description="Polymarket-vs-Binance arb bot")
@@ -207,6 +220,12 @@ def cli() -> None:
         action="store_true",
         default=False,
         help="Send real orders (default: paper-trade only)",
+    )
+    parser.add_argument(
+        "--duration",
+        type=float,
+        default=0.0,
+        help="Stop after N minutes and print PnL summary (default: run forever)",
     )
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING"])
     args = parser.parse_args()
@@ -221,10 +240,19 @@ def cli() -> None:
         import time as _t
         _t.sleep(5)
 
+    duration_secs = args.duration * 60.0
     try:
-        asyncio.run(main(paper=paper, log_level=args.log_level))
+        asyncio.run(main(paper=paper, log_level=args.log_level, duration_secs=duration_secs))
     except KeyboardInterrupt:
-        print("\nShutting down.")
+        print("\nInterrupted.")
+
+    # Always print the PnL summary on exit (clean stop or Ctrl-C).
+    print("\n--- Final PnL Summary ---")
+    try:
+        from .pnl import report
+        asyncio.run(report())
+    except Exception as exc:
+        print(f"PnL summary unavailable: {exc}")
 
 
 if __name__ == "__main__":
