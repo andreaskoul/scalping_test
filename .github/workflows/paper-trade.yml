@@ -1,0 +1,121 @@
+name: Paper-Trade Run
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: "How long to run the bot (minutes, max 330 for free runners)"
+        required: true
+        default: "60"
+        type: string
+      log_level:
+        description: "Log verbosity"
+        required: true
+        default: "INFO"
+        type: choice
+        options:
+          - INFO
+          - DEBUG
+          - WARNING
+      safety_eps:
+        description: "Edge cushion in probability points (0.003 = 30bps)"
+        required: true
+        default: "0.003"
+        type: string
+      max_notional:
+        description: "Max notional per simulated trade ($)"
+        required: true
+        default: "25"
+        type: string
+      binance_symbols:
+        description: "Comma-separated Binance symbols"
+        required: true
+        default: "btcusdt,ethusdt"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  paper-trade:
+    runs-on: ubuntu-latest
+    # Cap at 6h (free-runner ceiling). The bot self-terminates after
+    # `--duration`, so this is just a safety upper bound for setup + report.
+    timeout-minutes: 360
+
+    env:
+      BINANCE_SYMBOLS: ${{ inputs.binance_symbols }}
+      MAX_NOTIONAL_PER_TRADE: ${{ inputs.max_notional }}
+      EDGE_SAFETY_EPS: ${{ inputs.safety_eps }}
+      # Risk caps — keep generous in paper mode so they don't gate fills.
+      MAX_NOTIONAL_PER_MINUTE: "10000"
+      DAILY_DRAWDOWN_STOP: "100000"
+      COOLDOWN_SECS: "1.0"
+      BINANCE_STALE_SECS: "5.0"
+      POLY_STALE_SECS: "10.0"
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies (paper-mode only)
+        run: |
+          python -m pip install --upgrade pip
+          # Skip py-clob-client — paper mode doesn't need it and ckzg
+          # build is slow + flaky on Linux runners. Install core deps
+          # explicitly to keep the run lean and reproducible.
+          pip install aiohttp websockets numpy scipy python-dotenv aiosqlite pytest
+
+      - name: Run unit tests
+        run: pytest tests/ -q
+
+      - name: Probe Binance reachability (informational)
+        run: |
+          set +e
+          status=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://api.binance.com/api/v3/ticker/bookTicker?symbol=BTCUSDT" \
+            --max-time 8)
+          echo "Binance REST status from this runner: $status"
+          if [ "$status" = "451" ] || [ "$status" = "403" ]; then
+            echo "::warning::Binance is geo-blocked from this runner (HTTP $status). Spot data will be unavailable; no signals will fire. Use a self-hosted runner outside the blocked region, or wait for the Kraken fallback PR."
+          fi
+
+      - name: Run paper-trade bot
+        run: |
+          # Install the package so `python -m src.main` works.
+          pip install -e .
+          python -m src.main --duration ${{ inputs.duration_minutes }} --log-level ${{ inputs.log_level }}
+
+      - name: Show fills.db summary
+        if: always()
+        run: |
+          if [ -f fills.db ]; then
+            python - <<'PY'
+          import sqlite3
+          conn = sqlite3.connect("fills.db")
+          rows = conn.execute("SELECT side, price, size, p_star, edge, paper FROM fills ORDER BY ts").fetchall()
+          print(f"\nTotal fills recorded: {len(rows)}")
+          for r in rows[:50]:
+              print(f"  {r[0]} sz={r[2]:.2f} px={r[1]:.4f} p*={r[3]:.3f} edge={r[4]:.4f} paper={r[5]}")
+          if len(rows) > 50:
+              print(f"  ... +{len(rows)-50} more")
+          PY
+          else
+            echo "No fills.db produced."
+          fi
+
+      - name: Upload fills.db artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fills-${{ github.run_id }}
+          path: fills.db
+          if-no-files-found: ignore
+          retention-days: 14
