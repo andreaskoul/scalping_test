@@ -11,10 +11,10 @@ from src.poly_universe import PolyMarket
 from src.pricing import taker_fee_per_share, FEE_RATE_CRYPTO
 
 
-def _market(strike: float = 94000.0, expiry_offset: float = 3600.0) -> PolyMarket:
+def _market(strike: float = 94000.0, expiry_offset: float = 3000.0) -> PolyMarket:
     return PolyMarket(
         condition_id="cond-abc",
-        question=f"Will Bitcoin go up or down? Reference: ${strike:,.0f}",
+        question=f"Bitcoin above {strike:,.0f} at close?",
         yes_token_id="yes-token-001",
         no_token_id="no-token-001",
         yes_price=0.5,
@@ -49,14 +49,12 @@ def _book(bid: float, ask: float, bid_size: float = 100.0, ask_size: float = 100
 
 class TestEdgeCalc:
     def test_no_signal_when_edge_negative(self):
-        # spot=94100, strike=94000, sigma=0.5, T=1h → p* ≈ 0.578
-        # Set book so ask=0.56, bid=0.55 → both legs edge < 0
-        # BUY edge  = 0.578 - 0.56 - fee(0.56) - 0.003 ≈ -0.003 < 0
-        # SELL edge = 0.55 - 0.578 - fee(0.55) - 0.003 ≈ -0.049 < 0
+        # spot=94100, strike=94000, sigma=0.5, T=50min → p* ≈ 0.59
+        # ask=0.65 → buy edge negative; bid=0.45 → sell edge negative.
         gen = SignalGenerator(max_notional_per_trade=100, safety_eps=0.003)
         market = _market(strike=94000)
         btc = _binance(mid=94100, sigma=0.5)
-        book = _book(bid=0.55, ask=0.56)
+        book = _book(bid=0.45, ask=0.65)
         result = gen.evaluate(market, btc, book)
         assert result is None
 

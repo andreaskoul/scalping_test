@@ -14,8 +14,22 @@ Sizing:
     depth_at_top,                     # available size at top of book
     kelly_size,                       # fractional Kelly (optional)
   )
+
+Risk filters (all on by default; tunable via env vars):
+  - PRICE_MIN/PRICE_MAX  — never trade tails (fee≈0, but $1.00 downside).
+  - SIGMA_FLOOR          — clip realised σ up to a sane crypto baseline
+                           (60s rolling vol systematically under-prices
+                            tail risk on short windows).
+  - SKIP_UPDOWN          — Up/Down markets have their strike anchored to
+                           spot at *first observation*; for pre-listed
+                           windows this is an entirely synthetic strike
+                           uncorrelated with the actual resolution price.
+  - MIN_TTE_SECS         — don't trade within N min of expiry.
+  - MAX_TTE_SECS         — don't trade pre-listed markets > N hours away.
+  - REQUIRE_FRESH_BOOK   — skip if Polymarket book older than `book_max_age`.
 """
 
+import os
 import time
 import logging
 from dataclasses import dataclass
@@ -50,14 +64,28 @@ class SignalGenerator:
     def __init__(
         self,
         max_notional_per_trade: float = 25.0,
-        safety_eps: float = 0.003,
-        cooldown_secs: float = 1.0,
+        safety_eps: float = 0.02,           # 200bps cushion (was 30bps)
+        cooldown_secs: float = 5.0,         # raised from 1s to thin the firehose
         fee_rate: float = FEE_RATE_CRYPTO,
+        price_min: float = 0.10,            # skip 0.01 tails (huge downside)
+        price_max: float = 0.90,
+        sigma_floor: float = 0.40,          # crypto realised vol baseline
+        skip_updown: bool = True,           # strike anchoring is unreliable
+        min_tte_secs: float = 180.0,        # 3 min — fee dominates closer than that
+        max_tte_secs: float = 3600.0,       # 1 hour — pre-listed markets are noise
+        book_max_age_secs: float = 2.0,     # require fresh book to cross
     ):
         self.max_notional = max_notional_per_trade
         self.safety_eps = safety_eps
         self.cooldown = cooldown_secs
         self.fee_rate = fee_rate
+        self.price_min = price_min
+        self.price_max = price_max
+        self.sigma_floor = sigma_floor
+        self.skip_updown = skip_updown
+        self.min_tte_secs = min_tte_secs
+        self.max_tte_secs = max_tte_secs
+        self.book_max_age_secs = book_max_age_secs
         self._last_fire: dict[str, float] = {}  # token_id → monotonic ts
 
     def evaluate(
@@ -71,24 +99,38 @@ class SignalGenerator:
         now = time.monotonic()
         time_to_expiry = market.expiry_ts - time.time()
 
-        # Don't trade in the last 2 minutes — model degeneracy near expiry
-        if time_to_expiry < 120:
+        # tte gates — skip near-expiry (model degeneracy + huge fee/edge ratio)
+        # and far-expiry (pre-listed Up/Down or threshold markets we can't price).
+        if time_to_expiry < self.min_tte_secs:
+            return None
+        if time_to_expiry > self.max_tte_secs:
             return None
 
-        # Skip if Binance σ hasn't warmed up — fewer than 5 trades in window
-        from .pricing import SIGMA_MIN
-        if binance.sigma_annual <= SIGMA_MIN:
+        # Skip Up/Down markets — their strike is set at the official window-
+        # open time on Polymarket, not at our first observation. Anchoring
+        # to spot at first observation produces a synthetic strike that
+        # systematically biases p* away from 0.5 on pre-listed markets.
+        if self.skip_updown and ("up or down" in market.question.lower()):
             return None
 
-        # Skip if strike isn't yet anchored (Up/Down markets need spot snapshot).
+        # Skip if strike isn't anchored or spot is missing.
         if market.strike <= 0 or binance.mid <= 0:
+            return None
+
+        # Floor σ — short rolling realised vol systematically under-prices
+        # tail risk on 5-minute windows for crypto.
+        sigma_used = max(binance.sigma_annual, self.sigma_floor)
+
+        # Require a recent Polymarket print (the book might have moved
+        # several ticks since the snapshot was taken).
+        if (now - yes_book.ts) > self.book_max_age_secs:
             return None
 
         p_star = implied_prob(
             spot=binance.mid,
             strike=market.strike,
             time_to_expiry_secs=time_to_expiry,
-            sigma_annual=binance.sigma_annual,
+            sigma_annual=sigma_used,
         )
 
         # --- try to BUY the YES (Up) token ---
@@ -99,7 +141,7 @@ class SignalGenerator:
             p_star=p_star,
             book=yes_book,
             now=now,
-            sigma=binance.sigma_annual,
+            sigma=sigma_used,
         )
         if signal:
             return signal
@@ -112,7 +154,7 @@ class SignalGenerator:
             p_star=p_star,
             book=yes_book,
             now=now,
-            sigma=binance.sigma_annual,
+            sigma=sigma_used,
         )
         return signal
 
@@ -129,12 +171,18 @@ class SignalGenerator:
         if side == Side.BUY:
             exec_price = book.best_ask
             available_size = book.ask_size
-            fee = taker_fee_per_share(exec_price, self.fee_rate)
-            edge = p_star - exec_price - fee - self.safety_eps
         else:
             exec_price = book.best_bid
             available_size = book.bid_size
-            fee = taker_fee_per_share(exec_price, self.fee_rate)
+
+        # Tail filter: never sell at 0.01 or buy at 0.99. Tiny credit, $1 downside.
+        if exec_price < self.price_min or exec_price > self.price_max:
+            return None
+
+        fee = taker_fee_per_share(exec_price, self.fee_rate)
+        if side == Side.BUY:
+            edge = p_star - exec_price - fee - self.safety_eps
+        else:
             edge = exec_price - p_star - fee - self.safety_eps
 
         if edge <= 0:
