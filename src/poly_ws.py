@@ -20,7 +20,8 @@ log = logging.getLogger(__name__)
 
 CLOB_REST = "https://clob.polymarket.com"
 POLL_INTERVAL_SECS: float = 0.5
-REQUEST_TIMEOUT: float = 3.0
+REQUEST_TIMEOUT: float = 5.0
+BATCH_SIZE: int = 100   # max tokens per POST /books request
 
 
 @dataclass
@@ -79,51 +80,67 @@ class PolyWS:
         self._token_ids = list(self._books)
 
     async def run(self) -> None:
+        """Batch-poll books via POST /books to keep request count low.
+
+        With ~150 tokens, the per-token GET approach hits ~300 req/s and
+        triggers IP rate-limits within minutes. The batch endpoint accepts
+        a JSON array of {token_id} and returns one book per entry, so a
+        full universe refresh costs 2–3 requests instead of 150.
+        """
         timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             self._session = session
-            log.info("Polymarket REST poller started (interval=%.1fs)", POLL_INTERVAL_SECS)
+            log.info("Polymarket REST poller started (interval=%.1fs, batch /books)", POLL_INTERVAL_SECS)
             while True:
                 tokens = list(self._token_ids)
-                tasks = [self._fetch_book(session, tid) for tid in tokens]
-                if tasks:
-                    await asyncio.gather(*tasks, return_exceptions=True)
+                if tokens:
+                    chunks = [tokens[i:i + BATCH_SIZE] for i in range(0, len(tokens), BATCH_SIZE)]
+                    await asyncio.gather(
+                        *[self._fetch_books_batch(session, c) for c in chunks],
+                        return_exceptions=True,
+                    )
                 await asyncio.sleep(POLL_INTERVAL_SECS)
 
-    async def _fetch_book(self, session: aiohttp.ClientSession, token_id: str) -> None:
-        url = f"{CLOB_REST}/book"
+    async def _fetch_books_batch(
+        self, session: aiohttp.ClientSession, token_ids: list[str]
+    ) -> None:
+        body = [{"token_id": tid} for tid in token_ids]
         try:
-            async with session.get(url, params={"token_id": token_id}) as resp:
+            async with session.post(f"{CLOB_REST}/books", json=body) as resp:
                 if resp.status != 200:
+                    log.debug("Batch /books status=%d", resp.status)
                     return
                 data = await resp.json()
         except Exception as exc:
-            log.debug("Book fetch error for %s: %s", token_id[:12], exc)
+            log.debug("Batch /books error: %s", exc)
             return
 
         now = time.monotonic()
-        bids = data.get("bids", [])
-        asks = data.get("asks", [])
+        for entry in data if isinstance(data, list) else []:
+            tid = str(entry.get("asset_id") or entry.get("token_id") or "")
+            if not tid:
+                continue
+            bids = entry.get("bids", []) or []
+            asks = entry.get("asks", []) or []
 
-        best_bid = best_bid_size = 0.0
-        best_ask = best_ask_size = 1.0
+            best_bid = best_bid_size = 0.0
+            best_ask = best_ask_size = 1.0
 
-        if bids:
-            top = max(bids, key=lambda x: float(x.get("price", 0)))
-            best_bid = float(top.get("price", 0))
-            best_bid_size = float(top.get("size", 0))
+            if bids:
+                top = max(bids, key=lambda x: float(x.get("price", 0)))
+                best_bid = float(top.get("price", 0))
+                best_bid_size = float(top.get("size", 0))
+            if asks:
+                top = min(asks, key=lambda x: float(x.get("price", 1)))
+                best_ask = float(top.get("price", 1))
+                best_ask_size = float(top.get("size", 0))
 
-        if asks:
-            top = min(asks, key=lambda x: float(x.get("price", 1)))
-            best_ask = float(top.get("price", 1))
-            best_ask_size = float(top.get("size", 0))
-
-        if token_id not in self._books:
-            self._books[token_id] = {}
-        self._books[token_id].update({
-            "bid": best_bid,
-            "ask": best_ask,
-            "bid_size": best_bid_size,
-            "ask_size": best_ask_size,
-            "ts": now,
-        })
+            if tid not in self._books:
+                self._books[tid] = {}
+            self._books[tid].update({
+                "bid": best_bid,
+                "ask": best_ask,
+                "bid_size": best_bid_size,
+                "ask_size": best_ask_size,
+                "ts": now,
+            })

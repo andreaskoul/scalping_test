@@ -50,7 +50,7 @@ async def main(paper: bool, log_level: str = "INFO") -> None:
     if not paper and not private_key:
         raise SystemExit("POLY_PRIVATE_KEY must be set in .env for live mode")
 
-    symbols = os.getenv("BINANCE_SYMBOLS", "btcusdt,ethusdt").split(",")
+    symbols = [s.strip().lower() for s in os.getenv("BINANCE_SYMBOLS", "btcusdt,ethusdt").split(",") if s.strip()]
     max_notional = float(os.getenv("MAX_NOTIONAL_PER_TRADE", "25"))
     max_per_min = float(os.getenv("MAX_NOTIONAL_PER_MINUTE", "200"))
     drawdown_stop = float(os.getenv("DAILY_DRAWDOWN_STOP", "500"))
@@ -61,6 +61,8 @@ async def main(paper: bool, log_level: str = "INFO") -> None:
 
     mode = "PAPER" if paper else "LIVE"
     log.info("=== Polymarket-vs-Binance arb bot starting [%s] ===", mode)
+    log.info("Binance symbols: %s | safety_eps=%.4f cooldown=%.1fs notional<=%.0f",
+             symbols, safety_eps, cooldown, max_notional)
 
     # Components
     binance_clients = {sym: BinanceWS(sym, stale_threshold_secs=binance_stale) for sym in symbols}
@@ -90,6 +92,8 @@ async def main(paper: bool, log_level: str = "INFO") -> None:
     # Universe + eval loop
     markets = []
     last_refresh = 0.0
+    last_heartbeat = 0.0
+    HEARTBEAT_SECS = 30.0
 
     async with aiohttp.ClientSession() as session:
         while True:
@@ -110,12 +114,17 @@ async def main(paper: bool, log_level: str = "INFO") -> None:
                 last_refresh = now
                 log.info("Universe refreshed: %d markets", len(markets))
 
+            # Pipeline-state stats accumulated this iteration.
+            n_evaluated = n_skipped_no_spot = n_skipped_no_book = n_skipped_warmup = 0
+            top_edge_seen = (-1.0, "")  # (raw |p* - mid|, market_question)
+
             for market in markets:
                 binance_client = binance_clients.get(market.symbol)
                 if binance_client is None:
                     continue
                 binance_tick = binance_client.snapshot()
                 if binance_tick is None:
+                    n_skipped_no_spot += 1
                     continue
 
                 # Up/Down markets: use live Binance mid as the reference strike
@@ -124,8 +133,25 @@ async def main(paper: bool, log_level: str = "INFO") -> None:
 
                 yes_book = poly_ws.snapshot(market.yes_token_id)
                 if yes_book is None:
+                    n_skipped_no_book += 1
                     continue
 
+                from .pricing import implied_prob, SIGMA_MIN
+                if binance_tick.sigma_annual <= SIGMA_MIN:
+                    n_skipped_warmup += 1
+                    continue
+
+                # Track the largest raw mispricing visible right now —
+                # gives the user signal even if no trade fires.
+                tte = market.expiry_ts - now
+                if tte > 120 and market.strike > 0:
+                    p_star = implied_prob(binance_tick.mid, market.strike, tte, binance_tick.sigma_annual)
+                    poly_mid = (yes_book.best_bid + yes_book.best_ask) / 2
+                    raw = abs(p_star - poly_mid)
+                    if raw > top_edge_seen[0]:
+                        top_edge_seen = (raw, market.question)
+
+                n_evaluated += 1
                 signal = signal_gen.evaluate(market, binance_tick, yes_book)
                 if signal is None:
                     continue
@@ -144,6 +170,22 @@ async def main(paper: bool, log_level: str = "INFO") -> None:
                     risk.record_fill(fill.price * fill.size)
                 else:
                     risk.record_error()
+
+            # Heartbeat: state of the pipeline so the user sees progress
+            # even when no signals fire.
+            if now - last_heartbeat > HEARTBEAT_SECS:
+                sigmas = {}
+                for sym, bc in binance_clients.items():
+                    snap = bc.snapshot()
+                    sigmas[sym] = snap.sigma_annual if snap else 0.0
+                sigma_str = " ".join(f"{s}σ={v:.3f}" for s, v in sigmas.items())
+                log.info(
+                    "HEARTBEAT eval=%d no-spot=%d no-book=%d warmup=%d markets=%d %s top-raw-gap=%.3f (%s)",
+                    n_evaluated, n_skipped_no_spot, n_skipped_no_book, n_skipped_warmup,
+                    len(markets), sigma_str,
+                    top_edge_seen[0], top_edge_seen[1][:50],
+                )
+                last_heartbeat = now
 
             await asyncio.sleep(EVAL_INTERVAL_SECS)
 
