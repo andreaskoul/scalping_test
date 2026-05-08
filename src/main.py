@@ -108,11 +108,21 @@ async def main(paper: bool, log_level: str = "INFO") -> None:
             if now - last_refresh > UNIVERSE_REFRESH_SECS:
                 markets = await fetch_active_markets(session)
                 token_ids = []
+                missing_symbols: dict[str, int] = {}
                 for m in markets:
                     token_ids += [m.yes_token_id, m.no_token_id]
+                    if m.symbol not in binance_clients:
+                        missing_symbols[m.symbol] = missing_symbols.get(m.symbol, 0) + 1
                 poly_ws.update_tokens(token_ids)
                 last_refresh = now
                 log.info("Universe refreshed: %d markets", len(markets))
+                if missing_symbols:
+                    log.warning(
+                        "Skipping %d markets — no Binance feed for symbols: %s. "
+                        "Add to BINANCE_SYMBOLS env var to enable.",
+                        sum(missing_symbols.values()),
+                        ",".join(f"{s}({n})" for s, n in missing_symbols.items()),
+                    )
 
             # Pipeline-state stats accumulated this iteration.
             n_evaluated = n_skipped_no_spot = n_skipped_no_book = n_skipped_warmup = 0

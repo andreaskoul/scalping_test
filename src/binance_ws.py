@@ -122,17 +122,29 @@ class BinanceWS:
             msg = json.loads(raw)
         except json.JSONDecodeError:
             return
+
+        # /stream?streams=... multiplex format wraps the payload in `data`
+        # and identifies the source stream in `stream`. The bookTicker
+        # payload has NO `"e"` event field — only the symbol + b/B/a/A —
+        # so identify it by stream name (or by the field shape as fallback).
+        stream = (msg.get("stream") or "").lower()
         data = msg.get("data", msg)
-        event = data.get("e")
         now = time.monotonic()
 
-        if event == "bookTicker":
-            self._state.bid = float(data["b"])
-            self._state.ask = float(data["a"])
-            self._ts = now
+        if "bookticker" in stream or ("b" in data and "a" in data and "u" in data and "e" not in data):
+            try:
+                self._state.bid = float(data["b"])
+                self._state.ask = float(data["a"])
+                self._ts = now
+            except (KeyError, ValueError, TypeError):
+                pass
+            return
 
-        elif event == "aggTrade":
-            price = float(data["p"])
+        if data.get("e") == "aggTrade":
+            try:
+                price = float(data["p"])
+            except (KeyError, ValueError, TypeError):
+                return
             if self._state.last_trade_price > 0:
                 lr = math.log(price / self._state.last_trade_price)
                 self._state.log_returns.append((now, lr))
