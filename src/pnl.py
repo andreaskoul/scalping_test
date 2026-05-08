@@ -80,38 +80,49 @@ def _fold_positions(fills: list[dict]) -> dict[str, Position]:
     return pos
 
 
-async def _fetch_book_mid(session: aiohttp.ClientSession, token_id: str) -> float | None:
+async def _fetch_book_mid(session: aiohttp.ClientSession, token_id: str) -> tuple[float | None, bool]:
+    """Return (mid, is_dead) where is_dead=True if the book has no liquidity
+    on either side (typically a resolved/delisted market)."""
     try:
         async with session.get(
             CLOB_BOOK, params={"token_id": token_id},
             timeout=aiohttp.ClientTimeout(total=5),
         ) as r:
             if r.status != 200:
-                return None
+                return None, False
             d = await r.json()
             bids, asks = d.get("bids", []), d.get("asks", [])
+            if not bids and not asks:
+                return None, True   # market gone
             if not bids or not asks:
-                return None
+                return None, False
             bb = max(float(b["price"]) for b in bids)
             ba = min(float(a["price"]) for a in asks)
-            return (bb + ba) / 2
+            return (bb + ba) / 2, False
     except Exception:
-        return None
+        return None, False
 
 
 async def _fetch_resolution(session: aiohttp.ClientSession, market_id: str) -> float | None:
-    """Return 1.0 if YES won, 0.0 if NO won, None if unresolved."""
+    """Return 1.0 if YES won, 0.0 if NO won, None if unresolved.
+
+    Tries the Gamma API by `condition_ids` query param (the market_id we
+    persist is the conditionId, not the numeric id).
+    """
     try:
         async with session.get(
-            f"{GAMMA_API}/{market_id}",
+            GAMMA_API,
+            params={"condition_ids": market_id, "closed": "true", "limit": 1},
             timeout=aiohttp.ClientTimeout(total=5),
         ) as r:
             if r.status != 200:
                 return None
-            m = await r.json()
+            data = await r.json(content_type=None)
+            if not data:
+                return None
+            m = data[0] if isinstance(data, list) else data
             if not m.get("closed"):
                 return None
-            # outcomePrices ends up as ["1","0"] or ["0","1"] post-resolution
             prices = m.get("outcomePrices") or "[]"
             if isinstance(prices, str):
                 import json as _j
@@ -119,9 +130,9 @@ async def _fetch_resolution(session: aiohttp.ClientSession, market_id: str) -> f
                     prices = _j.loads(prices)
                 except Exception:
                     return None
-            if not prices or len(prices) < 1:
+            if not prices:
                 return None
-            return float(prices[0])  # YES price at resolution
+            return float(prices[0])  # YES outcome price at resolution
     except Exception:
         return None
 
@@ -149,49 +160,77 @@ async def report(db_path: str = DB_PATH) -> None:
     # Mark-to-market + resolution lookup
     mtm_pnl = 0.0
     realized_pnl = 0.0
-    win_count = lose_count = 0
-    rows: list[tuple[str, Position, float | None, float | None]] = []
+    unknown_pnl = 0.0
+    win_count = lose_count = unknown_count = 0
 
     async with aiohttp.ClientSession() as s:
-        # Fetch mid + resolution for each unique market_id
         unique_markets = list({p.market_id for p in positions.values()})
         unique_tokens = list(positions.keys())
-        mids = await asyncio.gather(*[_fetch_book_mid(s, tid) for tid in unique_tokens])
+        book_results = await asyncio.gather(*[_fetch_book_mid(s, tid) for tid in unique_tokens])
         resols = await asyncio.gather(*[_fetch_resolution(s, mid) for mid in unique_markets])
-        mid_by_token = dict(zip(unique_tokens, mids))
+        mid_by_token = {t: r[0] for t, r in zip(unique_tokens, book_results)}
+        dead_by_token = {t: r[1] for t, r in zip(unique_tokens, book_results)}
         resol_by_market = dict(zip(unique_markets, resols))
 
-    print(f"\n{'Market':<50} {'shares':>9} {'avg':>7} {'mark':>7} {'resol':>6} {'PnL':>9}")
-    print("-" * 95)
+    print(f"\n{'Market':<50} {'shares':>10} {'avg':>7} {'mark':>8} {'resol':>6} {'PnL':>11}")
+    print("-" * 100)
     for tid, p in positions.items():
         if abs(p.shares) < 1e-6:
             continue
         resol = resol_by_market.get(p.market_id)
         mark = mid_by_token.get(tid)
-        # YES position PnL = shares * (mark - avg). SELL = shorted YES.
+        is_dead = dead_by_token.get(tid, False)
+
+        # Inference: if the book is empty on both sides AND we can't fetch
+        # resolution, infer from entry price. Selling at 0.01 means the
+        # market was deemed deep OTM; if it's now delisted, NO most likely
+        # won → ref = 0. Buying at 0.99 means deep ITM → ref = 1.
+        if resol is None and is_dead:
+            if p.avg_price <= 0.05:
+                resol = 1.0 if p.shares > 0 else 0.0
+            elif p.avg_price >= 0.95:
+                resol = 1.0 if p.shares > 0 else 0.0   # bought ITM, likely won
+                # but actually if we bought at 0.99 the YES side is
+                # deemed near-certain → resol = 1.0
+                resol = 1.0
+            # leave middle-of-book positions as unknown
+
         ref = resol if resol is not None else mark
-        pnl = (ref - p.avg_price) * p.shares - p.fee_paid if ref is not None else 0.0
+        if ref is not None:
+            pnl = (ref - p.avg_price) * p.shares - p.fee_paid
+        else:
+            pnl = None
+
+        status = ""
         if resol is not None:
             realized_pnl += pnl
+            status = "RESOLVED"
             if pnl > 0:
                 win_count += 1
             elif pnl < 0:
                 lose_count += 1
-        else:
+        elif mark is not None:
             mtm_pnl += pnl
-        line = (
-            f"{p.market_id[:48]:<50} "
-            f"{p.shares:>+9.2f} {p.avg_price:>7.4f} "
-            f"{mark if mark is not None else 0:>7.4f} "
-            f"{resol if resol is not None else float('nan'):>6.2f} "
-            f"{pnl:>+9.4f}"
-        )
-        print(line)
+            status = "MTM"
+        else:
+            unknown_count += 1
+            status = "DEAD" if is_dead else "STALE"
 
-    print("-" * 95)
-    print(f"Realized PnL:    ${realized_pnl:+.4f}  ({win_count}W / {lose_count}L)")
-    print(f"Unrealized MtM:  ${mtm_pnl:+.4f}")
-    print(f"Total PnL:       ${realized_pnl + mtm_pnl:+.4f}")
+        mark_str = f"{mark:>8.4f}" if mark is not None else "    n/a"
+        resol_str = f"{resol:>6.2f}" if resol is not None else "   n/a"
+        pnl_str = f"{pnl:>+11.4f}" if pnl is not None else "   unknown"
+        print(
+            f"{p.market_id[:48]:<50} "
+            f"{p.shares:>+10.2f} {p.avg_price:>7.4f} "
+            f"{mark_str} {resol_str} {pnl_str}  [{status}]"
+        )
+
+    print("-" * 100)
+    print(f"Realized PnL:    ${realized_pnl:+,.4f}  ({win_count}W / {lose_count}L)")
+    print(f"Unrealized MtM:  ${mtm_pnl:+,.4f}")
+    if unknown_count:
+        print(f"Unknown:         {unknown_count} positions (book empty + resolution lookup failed)")
+    print(f"Total PnL:       ${realized_pnl + mtm_pnl:+,.4f}  (excluding unknown)")
 
 
 def cli() -> None:
