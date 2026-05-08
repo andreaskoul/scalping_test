@@ -75,6 +75,15 @@ class SignalGenerator:
         if time_to_expiry < 120:
             return None
 
+        # Skip if Binance σ hasn't warmed up — fewer than 5 trades in window
+        from .pricing import SIGMA_MIN
+        if binance.sigma_annual <= SIGMA_MIN:
+            return None
+
+        # Skip if strike isn't yet anchored (Up/Down markets need spot snapshot).
+        if market.strike <= 0 or binance.mid <= 0:
+            return None
+
         p_star = implied_prob(
             spot=binance.mid,
             strike=market.strike,

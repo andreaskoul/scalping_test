@@ -86,9 +86,11 @@ class BinanceWS:
         return (time.monotonic() - self._ts) > self.stale_threshold
 
     def _compute_sigma(self) -> float:
+        # Need at least 5 trades to produce a vaguely-stable σ estimate.
+        # Caller treats σ <= SIGMA_MIN as "not ready" and skips the market.
         cutoff = time.monotonic() - VOL_WINDOW_SECS
         recent = [r for ts, r in self._state.log_returns if ts >= cutoff]
-        if len(recent) < 2:
+        if len(recent) < 5:
             return SIGMA_MIN
         return realized_vol_annual(recent, VOL_WINDOW_SECS)
 
