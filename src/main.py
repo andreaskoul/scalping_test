@@ -54,15 +54,26 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
     max_notional = float(os.getenv("MAX_NOTIONAL_PER_TRADE", "25"))
     max_per_min = float(os.getenv("MAX_NOTIONAL_PER_MINUTE", "200"))
     drawdown_stop = float(os.getenv("DAILY_DRAWDOWN_STOP", "500"))
-    safety_eps = float(os.getenv("EDGE_SAFETY_EPS", "0.003"))
-    cooldown = float(os.getenv("COOLDOWN_SECS", "1.0"))
+    safety_eps = float(os.getenv("EDGE_SAFETY_EPS", "0.02"))
+    cooldown = float(os.getenv("COOLDOWN_SECS", "5.0"))
     binance_stale = float(os.getenv("BINANCE_STALE_SECS", "2.0"))
     poly_stale = float(os.getenv("POLY_STALE_SECS", "5.0"))
+    price_min = float(os.getenv("PRICE_MIN", "0.10"))
+    price_max = float(os.getenv("PRICE_MAX", "0.90"))
+    sigma_floor = float(os.getenv("SIGMA_FLOOR", "0.40"))
+    skip_updown = os.getenv("SKIP_UPDOWN", "1") not in ("0", "false", "False")
+    min_tte_secs = float(os.getenv("MIN_TTE_SECS", "180"))
+    max_tte_secs = float(os.getenv("MAX_TTE_SECS", "3600"))
+    book_max_age_secs = float(os.getenv("BOOK_MAX_AGE_SECS", "2.0"))
 
     mode = "PAPER" if paper else "LIVE"
     log.info("=== Polymarket-vs-Binance arb bot starting [%s] ===", mode)
-    log.info("Binance symbols: %s | safety_eps=%.4f cooldown=%.1fs notional<=%.0f",
-             symbols, safety_eps, cooldown, max_notional)
+    log.info(
+        "Binance symbols: %s | safety_eps=%.4f cooldown=%.1fs notional<=%.0f "
+        "| price=[%.2f,%.2f] σ_floor=%.2f tte=[%.0f,%.0f]s skip_updown=%s",
+        symbols, safety_eps, cooldown, max_notional,
+        price_min, price_max, sigma_floor, min_tte_secs, max_tte_secs, skip_updown,
+    )
     if duration_secs > 0:
         log.info("Will stop after %.0f seconds and print PnL summary.", duration_secs)
 
@@ -73,6 +84,13 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
         max_notional_per_trade=max_notional,
         safety_eps=safety_eps,
         cooldown_secs=cooldown,
+        price_min=price_min,
+        price_max=price_max,
+        sigma_floor=sigma_floor,
+        skip_updown=skip_updown,
+        min_tte_secs=min_tte_secs,
+        max_tte_secs=max_tte_secs,
+        book_max_age_secs=book_max_age_secs,
     )
     risk = RiskManager(
         max_notional_per_trade=max_notional,
