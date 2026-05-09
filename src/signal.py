@@ -58,6 +58,8 @@ class Signal:
     p_star: float           # Binance-implied probability
     edge: float             # edge in probability points (after fee)
     sigma: float
+    arb_id: str = ""        # set on multi-leg static-arb signals so PnL
+                            # accounting can pair the legs
 
 
 class SignalGenerator:

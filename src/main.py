@@ -36,6 +36,7 @@ load_dotenv()
 
 import aiohttp
 
+from .arbitrage import find_strike_arbs
 from .binance_ws import BinanceWS
 from .category import CategoryTracker
 from .deribit_iv import DeribitIV
@@ -44,7 +45,7 @@ from .poly_universe import fetch_active_markets
 from .poly_ws import PolyWS
 from .pricing import implied_prob, SIGMA_MIN
 from .risk import RiskManager
-from .signal import SignalGenerator
+from .signal import Side, Signal, SignalGenerator
 
 log = logging.getLogger(__name__)
 
@@ -150,6 +151,8 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
     iv_oracle = DeribitIV(symbols=symbols)
     effective_spread_mult = float(os.getenv("EFFECTIVE_SPREAD_MULT", "1.3"))
     max_walk_slippage = float(os.getenv("MAX_WALK_SLIPPAGE", "0.05"))
+    arb_min_credit = float(os.getenv("ARB_MIN_CREDIT", "0.01"))
+    arb_enabled = os.getenv("ARB_ENABLED", "1") not in ("0", "false", "False")
     signal_gen = SignalGenerator(
         max_notional_per_trade=max_notional,
         safety_eps=safety_eps,
@@ -203,6 +206,7 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
 
     # Heartbeat-window cumulative counters.
     cum_eval = cum_no_spot = cum_no_book = cum_warmup = cum_signals = cum_fills = 0
+    cum_arbs = cum_arb_fills = 0
     top_edge_seen = (-1.0, "")
 
     last_heartbeat = time.monotonic()
@@ -341,6 +345,72 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
                 else:
                     risk.record_error()
 
+            # ---- Static arbitrage scan (model-free) ----
+            # Strike-monotonicity violations on the threshold ladder are
+            # risk-free static arbs. They're rare but persistent because
+            # different makers run the various strikes independently and
+            # don't always cross-link instantly. Reference:
+            # arXiv:2508.03474 (Saguillo et al, AFT 2025) — combinatorial
+            # arbitrage extracted ~$40M from Polymarket in 2024–25.
+            if arb_enabled:
+                arbs = find_strike_arbs(
+                    markets, poly_ws,
+                    min_credit=arb_min_credit,
+                    max_notional_usd=max_notional,
+                    min_tte_secs=min_tte_secs,
+                    max_tte_secs=max_tte_secs,
+                )
+                for arb in arbs:
+                    cum_arbs += 1
+                    # Emit two paired Signals tagged with shared arb_id
+                    # so the PnL accountant can match the legs.
+                    sig_buy = Signal(
+                        market=arb.leg_low.market,
+                        token_id=arb.leg_low.token_id,
+                        side=Side.BUY,
+                        price=arb.leg_low.price,
+                        size=arb.leg_low.size,
+                        p_star=0.0,         # n/a for model-free arb
+                        edge=arb.net_credit,
+                        sigma=0.0,
+                        arb_id=arb.arb_id,
+                    )
+                    sig_sell = Signal(
+                        market=arb.leg_high.market,
+                        token_id=arb.leg_high.token_id,
+                        side=Side.SELL,
+                        price=arb.leg_high.price,
+                        size=arb.leg_high.size,
+                        p_star=0.0,
+                        edge=arb.net_credit,
+                        sigma=0.0,
+                        arb_id=arb.arb_id,
+                    )
+                    # Risk-check both legs as a unit.
+                    ok1, r1 = risk.check(sig_buy, binance_ts=now_mono, poly_ts=now_mono)
+                    ok2, r2 = risk.check(sig_sell, binance_ts=now_mono, poly_ts=now_mono)
+                    if not (ok1 and ok2):
+                        log.debug("Arb %s blocked by risk: %s / %s", arb.arb_id, r1, r2)
+                        continue
+                    f1 = await executor.execute(sig_buy)
+                    if f1 is None:
+                        risk.record_error()
+                        continue
+                    f2 = await executor.execute(sig_sell)
+                    if f2 is None:
+                        # Leg-1 filled, leg-2 didn't — orphan (paper mode
+                        # never hits this; live mode would need to flatten).
+                        log.warning("Arb %s leg-2 failed; leg-1 orphaned.", arb.arb_id)
+                        risk.record_error()
+                        continue
+                    cum_arb_fills += 1
+                    risk.record_fill(f1.price * f1.size)
+                    risk.record_fill(f2.price * f2.size)
+                    log.info(
+                        "ARB EXECUTED %s credit=%.4f notional=%.2f",
+                        arb.arb_id, arb.net_credit, arb.notional,
+                    )
+
             # ---- Heartbeat (cumulative over window) ----
             if (now_mono - last_heartbeat) > HEARTBEAT_SECS:
                 sigma_str_parts = []
@@ -352,14 +422,16 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
                     iv = iv_snap.sigma_annual if iv_snap else 0.0
                     sigma_str_parts.append(f"{sym}[σ={s:.3f} iv={iv:.3f} μ={d:+.3f}]")
                 log.info(
-                    "HEARTBEAT eval=%d signals=%d fills=%d no-spot=%d no-book=%d warmup=%d "
-                    "markets=%d %s top-raw-gap=%.3f (%s)",
+                    "HEARTBEAT eval=%d signals=%d fills=%d arbs=%d arb-fills=%d "
+                    "no-spot=%d no-book=%d warmup=%d markets=%d %s top-raw-gap=%.3f (%s)",
                     cum_eval, cum_signals, cum_fills,
+                    cum_arbs, cum_arb_fills,
                     cum_no_spot, cum_no_book, cum_warmup, len(markets),
                     " ".join(sigma_str_parts),
                     top_edge_seen[0], top_edge_seen[1][:50],
                 )
                 cum_eval = cum_no_spot = cum_no_book = cum_warmup = cum_signals = cum_fills = 0
+                cum_arbs = cum_arb_fills = 0
                 top_edge_seen = (-1.0, "")
                 last_heartbeat = now_mono
 
