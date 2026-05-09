@@ -64,17 +64,26 @@ class SignalGenerator:
     def __init__(
         self,
         max_notional_per_trade: float = 25.0,
-        safety_eps: float = 0.02,           # 200bps cushion (was 30bps)
-        cooldown_secs: float = 5.0,         # raised from 1s to thin the firehose
-        fee_rate: float = FEE_RATE_CRYPTO,
-        price_min: float = 0.10,            # skip 0.01 tails (huge downside)
+        safety_eps: float = 0.005,           # base cushion for unmodeled costs (gas, etc.)
+        cooldown_secs: float = 5.0,
+        fee_rate: float = FEE_RATE_CRYPTO,   # default; per-market rate overrides
+        price_min: float = 0.10,
         price_max: float = 0.90,
-        sigma_floor: float = 0.40,          # crypto realised vol baseline
-        skip_updown: bool = True,           # strike anchoring is unreliable
-        min_tte_secs: float = 180.0,        # 3 min — fee dominates closer than that
-        max_tte_secs: float = 3600.0,       # 1 hour — pre-listed markets are noise
-        book_max_age_secs: float = 2.0,     # require fresh book to cross
-        iv_oracle=None,                     # optional .snapshot(symbol) -> IVSnapshot
+        sigma_floor: float = 0.40,
+        skip_updown: bool = True,
+        min_tte_secs: float = 180.0,
+        max_tte_secs: float = 3600.0,
+        book_max_age_secs: float = 2.0,
+        iv_oracle=None,
+        poly_ws=None,                        # for walk_book() VWAP lookup
+        # Stoll/Huang-Stoll: effective spread is ~1.2-1.5× quoted spread
+        # because of fleeting quotes, hidden liquidity, and adverse
+        # selection. Default 1.3× is the median retail-venue estimate.
+        effective_spread_mult: float = 1.3,
+        # Cap on how far we'll walk the book before rejecting the trade,
+        # measured as |VWAP - best| / best. 5% means a $0.50 ask can cost
+        # at most $0.525 effective; beyond that we don't want the trade.
+        max_walk_slippage: float = 0.05,
     ):
         self.max_notional = max_notional_per_trade
         self.safety_eps = safety_eps
@@ -88,6 +97,9 @@ class SignalGenerator:
         self.max_tte_secs = max_tte_secs
         self.book_max_age_secs = book_max_age_secs
         self.iv_oracle = iv_oracle
+        self.poly_ws = poly_ws
+        self.effective_spread_mult = effective_spread_mult
+        self.max_walk_slippage = max_walk_slippage
         self._last_fire: dict[str, float] = {}  # token_id → monotonic ts
 
     def evaluate(
@@ -181,27 +193,71 @@ class SignalGenerator:
         sigma: float,
     ) -> Signal | None:
         if side == Side.BUY:
-            exec_price = book.best_ask
-            available_size = book.ask_size
+            top_price = book.best_ask
+            top_size = book.ask_size
         else:
-            exec_price = book.best_bid
-            available_size = book.bid_size
+            top_price = book.best_bid
+            top_size = book.bid_size
 
         # Tail filter: never sell at 0.01 or buy at 0.99. Tiny credit, $1 downside.
-        if exec_price < self.price_min or exec_price > self.price_max:
+        if top_price < self.price_min or top_price > self.price_max:
             return None
 
-        # Per-market fee schedule from Gamma — falls back to class default
-        # if the universe parser couldn't read it (older markets).
+        # ---- Sizing + walk-the-book VWAP ----
+        # If the desired size exceeds top-of-book depth we have to consume
+        # multiple levels, paying VWAP rather than the displayed best.
+        # The previous code silently assumed the whole order filled at
+        # the top — a Stoll-effective-spread error that hid 1-5% of cost
+        # on thin books.
+        if top_price <= 0:
+            return None
+        desired_shares = self.max_notional / top_price
+        if top_size > 0 and desired_shares <= top_size:
+            # Common case — fully fills at the top, VWAP == best price.
+            exec_price = top_price
+            size = round(min(desired_shares, top_size), 2)
+        elif self.poly_ws is not None:
+            vwap, available = self.poly_ws.walk_book(
+                token_id, side.value, desired_shares,
+            )
+            if vwap <= 0 or available <= 0:
+                return None
+            # Reject if walking the book would cost more than the cap.
+            slippage = abs(vwap - top_price) / top_price
+            if slippage > self.max_walk_slippage:
+                return None
+            exec_price = vwap
+            size = round(min(desired_shares, available), 2)
+        else:
+            # No level access — fall back to top-only (legacy behaviour).
+            exec_price = top_price
+            size = round(min(desired_shares, top_size if top_size > 0 else desired_shares), 2)
+
+        if size < 1.0:
+            return None
+
+        # ---- Cost model ----
+        # 1) Per-market parabolic taker fee.
         fee = taker_fee_per_share(
             exec_price,
             fee_rate=getattr(market, "fee_rate", self.fee_rate),
             fee_exponent=getattr(market, "fee_exponent", 1.0),
         )
+
+        # 2) Effective-spread cushion (Stoll 1989 / Huang-Stoll 1997).
+        # Quoted spread is already paid implicitly by crossing best bid/
+        # ask; effective spread is typically 1.2-1.5× larger because of
+        # fleeting quotes, hidden liquidity, and adverse selection. We
+        # charge the "extra" portion as an explicit cushion so the same
+        # safety_eps doesn't have to mean different things on tight vs
+        # wide books.
+        quoted_spread = max(0.0, book.best_ask - book.best_bid)
+        eff_spread_extra = (self.effective_spread_mult - 1.0) * quoted_spread
+
         if side == Side.BUY:
-            edge = p_star - exec_price - fee - self.safety_eps
+            edge = p_star - exec_price - fee - eff_spread_extra - self.safety_eps
         else:
-            edge = exec_price - p_star - fee - self.safety_eps
+            edge = exec_price - p_star - fee - eff_spread_extra - self.safety_eps
 
         if edge <= 0:
             return None
@@ -211,18 +267,11 @@ class SignalGenerator:
         if now - last < self.cooldown:
             return None
 
-        # Size
-        if exec_price <= 0:
-            return None
-        max_shares = self.max_notional / exec_price
-        size = round(min(max_shares, available_size if available_size > 0 else max_shares), 2)
-        if size < 1.0:
-            return None
-
         self._last_fire[token_id] = now
         log.info(
-            "Signal %s %s token=%s price=%.4f p*=%.4f edge=%.4f sigma=%.3f",
-            side.value, market.question[:60], token_id[:12], exec_price, p_star, edge, sigma,
+            "Signal %s %s token=%s px=%.4f (top=%.4f) p*=%.4f edge=%.4f sigma=%.3f size=%.1f",
+            side.value, market.question[:60], token_id[:12],
+            exec_price, top_price, p_star, edge, sigma, size,
         )
         return Signal(
             market=market,
