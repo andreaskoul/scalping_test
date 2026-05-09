@@ -30,8 +30,13 @@ def implied_prob(
     strike: float,
     time_to_expiry_secs: float,
     sigma_annual: float,
+    drift_annual: float = 0.0,
 ) -> float:
     """Return lognormal P(S_T > strike).
+
+    Optional `drift_annual` shifts the mean-log-return term — useful when
+    paired with an order-flow-imbalance signal so the pricer doesn't have
+    to assume zero drift over windows where the book is clearly moving.
 
     Returns 0.5 when time_to_expiry_secs <= 0 (fair coin at expiry
     boundary — caller should not trade this close).
@@ -46,9 +51,9 @@ def implied_prob(
     )
     T = time_to_expiry_secs / (365.25 * 24 * 3600)  # fraction of year
     sqrt_T = math.sqrt(T)
-    d = (math.log(spot / strike) - 0.5 * sigma_annual**2 * T) / (
-        sigma_annual * sqrt_T
-    )
+    d = (
+        math.log(spot / strike) + (drift_annual - 0.5 * sigma_annual**2) * T
+    ) / (sigma_annual * sqrt_T)
     return float(norm.cdf(d))
 
 
