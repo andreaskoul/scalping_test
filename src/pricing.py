@@ -57,14 +57,29 @@ def implied_prob(
     return float(norm.cdf(d))
 
 
-def taker_fee_per_share(price: float, fee_rate: float = FEE_RATE_CRYPTO) -> float:
+def taker_fee_per_share(
+    price: float,
+    fee_rate: float = FEE_RATE_CRYPTO,
+    fee_exponent: float = 1.0,
+) -> float:
     """Polymarket taker fee in dollars per share at a given price.
 
-    price should be between 0 and 1 (exclusive).
-    fee peaks at price=0.5 → fee_rate/4, collapses at the tails.
+    Live Polymarket feeSchedule shape:
+        fee = fee_rate × (price × (1-price))^fee_exponent
+
+    price should be between 0 and 1 (exclusive).  With exponent=1 (the
+    crypto/politics default) the fee peaks at price=0.5 → fee_rate/4 and
+    collapses at the tails.  Higher exponents narrow the fee curve.
+
+    The defaults match the crypto category as-of 2026-05; callers should
+    pass the per-market values from PolyMarket.fee_rate / fee_exponent
+    so changes in the live schedule propagate without a code change.
     """
     price = max(1e-6, min(1 - 1e-6, price))
-    return fee_rate * price * (1.0 - price)
+    base = price * (1.0 - price)
+    if fee_exponent == 1.0:
+        return fee_rate * base
+    return fee_rate * (base ** fee_exponent)
 
 
 def realized_vol_annual(log_returns: list[float], window_secs: float) -> float:

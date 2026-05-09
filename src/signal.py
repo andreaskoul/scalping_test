@@ -191,7 +191,13 @@ class SignalGenerator:
         if exec_price < self.price_min or exec_price > self.price_max:
             return None
 
-        fee = taker_fee_per_share(exec_price, self.fee_rate)
+        # Per-market fee schedule from Gamma — falls back to class default
+        # if the universe parser couldn't read it (older markets).
+        fee = taker_fee_per_share(
+            exec_price,
+            fee_rate=getattr(market, "fee_rate", self.fee_rate),
+            fee_exponent=getattr(market, "fee_exponent", 1.0),
+        )
         if side == Side.BUY:
             edge = p_star - exec_price - fee - self.safety_eps
         else:
