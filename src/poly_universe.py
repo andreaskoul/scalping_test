@@ -62,6 +62,10 @@ class PolyMarket:
     expiry_ts: float    # UTC unix timestamp
     tick_size: float    # from API; default 0.01
     symbol: str = "btcusdt"  # Binance feed to use
+    # Cached structural flags computed once at universe-load time so the
+    # signal generator doesn't have to re-derive them every tick.
+    is_updown: bool = False
+    is_threshold: bool = False
 
 
 def _parse_strike(question: str) -> float:
@@ -240,6 +244,8 @@ async def fetch_active_markets(
                     expiry_ts=expiry_ts,
                     tick_size=tick,
                     symbol=symbol,
+                    is_updown=is_updown,
+                    is_threshold=is_threshold,
                 )
             )
 

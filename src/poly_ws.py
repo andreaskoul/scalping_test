@@ -62,6 +62,45 @@ class BookSnapshot:
     ts: float  # monotonic
 
 
+def _empty_book() -> dict:
+    return {
+        "bids": {}, "asks": {},
+        "best_bid": 0.0, "best_bid_size": 0.0,
+        "best_ask": 1.0, "best_ask_size": 0.0,
+        "ts": 0.0,
+    }
+
+
+def _refresh_top(book: dict) -> bool:
+    """Recompute and store top-of-book from the level dicts.
+
+    Returns True iff the top-of-book moved (price or size changed on
+    either side) — the caller uses this to decide whether to mark the
+    token dirty for re-evaluation.
+    """
+    bids = book["bids"]
+    asks = book["asks"]
+    if bids:
+        bp = max(bids)
+        bs = bids[bp]
+    else:
+        bp, bs = 0.0, 0.0
+    if asks:
+        ap = min(asks)
+        asz = asks[ap]
+    else:
+        ap, asz = 1.0, 0.0
+    moved = (
+        bp != book["best_bid"] or bs != book["best_bid_size"]
+        or ap != book["best_ask"] or asz != book["best_ask_size"]
+    )
+    book["best_bid"] = bp
+    book["best_bid_size"] = bs
+    book["best_ask"] = ap
+    book["best_ask_size"] = asz
+    return moved
+
+
 class PolyWS:
     """Maintain Polymarket CLOB book state for a set of token_ids.
 
@@ -79,34 +118,75 @@ class PolyWS:
     ):
         self._token_ids: set[str] = set(token_ids)
         self._stale = stale_threshold_secs
-        # token_id → {bids: {price: size}, asks: {price: size}, ts}
+        # token_id → {
+        #   bids: {price: size},  asks: {price: size},
+        #   best_bid, best_bid_size, best_ask, best_ask_size,  # cached
+        #   ts,
+        # }
+        # The cached top-of-book is updated on every event so `snapshot()`
+        # is O(1). Without it, snapshot would do max/min across the whole
+        # level dict — at ~3000 calls/s on liquid universes that was the
+        # single largest CPU hot spot.
         self._books: dict[str, dict] = {}
         self._fill_callbacks: list = []
         self._ws = None
         self._subscribed: set[str] = set()
         self._sub_lock = asyncio.Lock()
+        # Set whenever ANY tracked book changes — the orchestrator can
+        # await this to drive event-driven evaluation instead of polling.
+        self._book_change = asyncio.Event()
+        # Tokens whose best-of-book changed since last drain — lets the
+        # orchestrator evaluate only the markets that could have moved.
+        self._dirty_tokens: set[str] = set()
 
     # ---------- public surface ----------
 
     def snapshot(self, token_id: str) -> BookSnapshot | None:
+        """O(1): reads the cached best-of-book updated by the WS handler."""
         b = self._books.get(token_id)
         if b is None:
             return None
-        ts = b.get("ts", 0.0)
+        ts = b["ts"]
         if ts <= 0 or (time.monotonic() - ts) > self._stale:
             return None
-        bid, bsize = self._best(b.get("bids", {}), best="max")
-        ask, asize = self._best(b.get("asks", {}), best="min")
+        bid = b["best_bid"]
         if bid <= 0:
             return None
         return BookSnapshot(
             token_id=token_id,
             best_bid=bid,
-            best_ask=ask,
-            bid_size=bsize,
-            ask_size=asize,
+            best_ask=b["best_ask"],
+            bid_size=b["best_bid_size"],
+            ask_size=b["best_ask_size"],
             ts=ts,
         )
+
+    def drain_dirty(self) -> set[str]:
+        """Return tokens whose top-of-book changed since the last drain.
+
+        The orchestrator calls this each loop iteration to know exactly
+        which markets to re-evaluate. Far cheaper than scanning every
+        market every tick.
+        """
+        if not self._dirty_tokens:
+            return set()
+        d = self._dirty_tokens
+        self._dirty_tokens = set()
+        self._book_change.clear()
+        return d
+
+    async def wait_change(self, timeout: float | None = None) -> bool:
+        """Block until at least one tracked book changes."""
+        if self._dirty_tokens:
+            return True
+        try:
+            if timeout is None:
+                await self._book_change.wait()
+                return True
+            await asyncio.wait_for(self._book_change.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
 
     def on_fill(self, callback) -> None:
         self._fill_callbacks.append(callback)
@@ -117,7 +197,7 @@ class PolyWS:
         new = set(token_ids) - self._token_ids
         self._token_ids.update(token_ids)
         for tid in new:
-            self._books.setdefault(tid, {"bids": {}, "asks": {}, "ts": 0.0})
+            self._books.setdefault(tid, _empty_book())
 
     async def run(self) -> None:
         """Connect, subscribe, dispatch events; reconnect on failure."""
@@ -158,19 +238,10 @@ class PolyWS:
 
     # ---------- internals ----------
 
-    @staticmethod
-    def _best(side: dict, best: str = "max") -> tuple[float, float]:
-        if not side:
-            return (0.0, 0.0) if best == "max" else (1.0, 0.0)
-        if best == "max":
-            price = max(side.keys())
-        else:
-            price = min(side.keys())
-        size = side.get(price, 0.0)
-        if size <= 0:
-            # Stale level — fall back gracefully.
-            return (0.0, 0.0) if best == "max" else (1.0, 0.0)
-        return price, size
+    def _mark_dirty(self, token_id: str) -> None:
+        self._dirty_tokens.add(token_id)
+        if not self._book_change.is_set():
+            self._book_change.set()
 
     async def _subscriber_loop(self) -> None:
         """Send subscribe messages whenever the tracked set grows."""
@@ -205,10 +276,12 @@ class PolyWS:
             tid = str(ev.get("asset_id") or ev.get("token_id") or "")
             if not tid:
                 continue
-            book = self._books.setdefault(tid, {"bids": {}, "asks": {}, "ts": 0.0})
+            book = self._books.get(tid)
+            if book is None:
+                book = _empty_book()
+                self._books[tid] = book
 
             if etype == "book":
-                # Full snapshot — replace levels.
                 book["bids"] = {
                     float(b["price"]): float(b["size"])
                     for b in (ev.get("bids") or [])
@@ -220,8 +293,9 @@ class PolyWS:
                     if float(a.get("size", 0)) > 0
                 }
                 book["ts"] = now
+                if _refresh_top(book):
+                    self._mark_dirty(tid)
             elif etype == "price_change":
-                # Incremental update — apply per-level deltas.
                 for ch in ev.get("changes") or []:
                     try:
                         price = float(ch["price"])
@@ -235,8 +309,9 @@ class PolyWS:
                     else:
                         levels[price] = size
                 book["ts"] = now
+                if _refresh_top(book):
+                    self._mark_dirty(tid)
             elif etype == "tick_size_change":
-                # No book impact for our purposes.
                 book["ts"] = now
 
     # ---------- REST fallback ----------
@@ -262,14 +337,18 @@ class PolyWS:
                     tid = str(entry.get("asset_id") or entry.get("token_id") or "")
                     if not tid:
                         continue
-                    bids = {
+                    book = self._books.get(tid) or _empty_book()
+                    book["bids"] = {
                         float(b["price"]): float(b["size"])
                         for b in (entry.get("bids") or [])
                         if float(b.get("size", 0)) > 0
                     }
-                    asks = {
+                    book["asks"] = {
                         float(a["price"]): float(a["size"])
                         for a in (entry.get("asks") or [])
                         if float(a.get("size", 0)) > 0
                     }
-                    self._books[tid] = {"bids": bids, "asks": asks, "ts": now}
+                    book["ts"] = now
+                    self._books[tid] = book
+                    if _refresh_top(book):
+                        self._mark_dirty(tid)
