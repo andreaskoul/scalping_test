@@ -148,6 +148,8 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
     binance_clients = {sym: BinanceWS(sym, stale_threshold_secs=binance_stale) for sym in symbols}
     poly_ws = PolyWS(token_ids=[], stale_threshold_secs=poly_stale)
     iv_oracle = DeribitIV(symbols=symbols)
+    effective_spread_mult = float(os.getenv("EFFECTIVE_SPREAD_MULT", "1.3"))
+    max_walk_slippage = float(os.getenv("MAX_WALK_SLIPPAGE", "0.05"))
     signal_gen = SignalGenerator(
         max_notional_per_trade=max_notional,
         safety_eps=safety_eps,
@@ -160,6 +162,9 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
         max_tte_secs=max_tte_secs,
         book_max_age_secs=book_max_age_secs,
         iv_oracle=iv_oracle,
+        poly_ws=poly_ws,
+        effective_spread_mult=effective_spread_mult,
+        max_walk_slippage=max_walk_slippage,
     )
     risk = RiskManager(
         max_notional_per_trade=max_notional,

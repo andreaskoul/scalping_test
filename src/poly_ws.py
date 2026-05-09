@@ -161,6 +161,44 @@ class PolyWS:
             ts=ts,
         )
 
+    def walk_book(self, token_id: str, side: str, target_size: float) -> tuple[float, float]:
+        """Volume-weighted average price for crossing `target_size` shares.
+
+        Returns (vwap, total_available).
+          - side="BUY": we cross the asks → consume from cheapest ask up.
+          - side="SELL": we hit the bids → consume from highest bid down.
+
+        If the book has less than target_size, returns (vwap_of_what_exists,
+        total_available). Caller decides whether the partial fill is
+        acceptable. If the book is empty on the chosen side, returns (0, 0).
+
+        Used by the signal generator to compute the *effective* execution
+        price when our desired size exceeds the depth at the top of book.
+        Without this, the bot assumes the entire order fills at the
+        displayed best price — a known-wrong assumption that can hide a
+        few percent of slippage on thin books.
+        """
+        b = self._books.get(token_id)
+        if b is None:
+            return 0.0, 0.0
+        if side.upper() == "BUY":
+            levels = sorted(b["asks"].items())  # ascending price
+        else:
+            levels = sorted(b["bids"].items(), reverse=True)  # descending price
+        remaining = target_size
+        cost = 0.0
+        filled = 0.0
+        for price, size in levels:
+            if remaining <= 0:
+                break
+            take = min(size, remaining)
+            cost += price * take
+            filled += take
+            remaining -= take
+        if filled <= 0:
+            return 0.0, 0.0
+        return cost / filled, filled
+
     def drain_dirty(self) -> set[str]:
         """Return tokens whose top-of-book changed since the last drain.
 
