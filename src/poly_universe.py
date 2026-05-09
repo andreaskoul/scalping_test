@@ -66,6 +66,13 @@ class PolyMarket:
     # signal generator doesn't have to re-derive them every tick.
     is_updown: bool = False
     is_threshold: bool = False
+    # Live taker fee schedule from Gamma feeSchedule:
+    #   fee_per_share = fee_rate * (price * (1-price))^fee_exponent
+    # Crypto markets observed live: rate=0.07 exponent=1 (peak 1.75% at p=0.5).
+    # Politics: rate=0.05 exponent=1. Pulled per-market so the same code
+    # works whatever Polymarket changes.
+    fee_rate: float = 0.07
+    fee_exponent: float = 1.0
 
 
 def _parse_strike(question: str) -> float:
@@ -232,6 +239,17 @@ async def fetch_active_markets(
             strike = _parse_strike(question) if is_threshold else 0.0
             symbol = "ethusdt" if ETH_RE.search(question) else "btcusdt"
             tick = float(m.get("orderPriceMinTickSize") or m.get("minimum_tick_size") or 0.01)
+
+            sched = m.get("feeSchedule") or {}
+            try:
+                fee_rate = float(sched.get("rate", 0.07))
+            except (TypeError, ValueError):
+                fee_rate = 0.07
+            try:
+                fee_exponent = float(sched.get("exponent", 1.0))
+            except (TypeError, ValueError):
+                fee_exponent = 1.0
+
             result.append(
                 PolyMarket(
                     condition_id=m.get("conditionId", m.get("id", "")),
@@ -246,6 +264,8 @@ async def fetch_active_markets(
                     symbol=symbol,
                     is_updown=is_updown,
                     is_threshold=is_threshold,
+                    fee_rate=fee_rate,
+                    fee_exponent=fee_exponent,
                 )
             )
 
