@@ -74,6 +74,7 @@ class SignalGenerator:
         min_tte_secs: float = 180.0,        # 3 min — fee dominates closer than that
         max_tte_secs: float = 3600.0,       # 1 hour — pre-listed markets are noise
         book_max_age_secs: float = 2.0,     # require fresh book to cross
+        iv_oracle=None,                     # optional .snapshot(symbol) -> IVSnapshot
     ):
         self.max_notional = max_notional_per_trade
         self.safety_eps = safety_eps
@@ -86,6 +87,7 @@ class SignalGenerator:
         self.min_tte_secs = min_tte_secs
         self.max_tte_secs = max_tte_secs
         self.book_max_age_secs = book_max_age_secs
+        self.iv_oracle = iv_oracle
         self._last_fire: dict[str, float] = {}  # token_id → monotonic ts
 
     def evaluate(
@@ -117,9 +119,17 @@ class SignalGenerator:
         if market.strike <= 0 or binance.mid <= 0:
             return None
 
-        # Floor σ — short rolling realised vol systematically under-prices
-        # tail risk on 5-minute windows for crypto.
-        sigma_used = max(binance.sigma_annual, self.sigma_floor)
+        # σ blend: max of EWMA realised, options-implied (Deribit), and a
+        # hard floor.  IV is the forward-vol consensus the maker bots use;
+        # using only realised would put us at a structural info disadvantage
+        # exactly when realised undershoots IV (quiet body of distribution
+        # masking real tail risk).
+        sigma_iv = 0.0
+        if self.iv_oracle is not None:
+            iv_snap = self.iv_oracle.snapshot(binance.symbol)
+            if iv_snap is not None:
+                sigma_iv = iv_snap.sigma_annual
+        sigma_used = max(binance.sigma_annual, sigma_iv, self.sigma_floor)
 
         # Require a recent Polymarket print (the book might have moved
         # several ticks since the snapshot was taken).

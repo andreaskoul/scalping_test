@@ -24,6 +24,7 @@ load_dotenv()
 
 from .binance_ws import BinanceWS
 from .category import CategoryTracker
+from .deribit_iv import DeribitIV
 from .execute import Executor
 from .poly_universe import fetch_active_markets
 from .poly_ws import PolyWS
@@ -81,6 +82,7 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
     # Components
     binance_clients = {sym: BinanceWS(sym, stale_threshold_secs=binance_stale) for sym in symbols}
     poly_ws = PolyWS(token_ids=[], stale_threshold_secs=poly_stale)
+    iv_oracle = DeribitIV(symbols=symbols)
     signal_gen = SignalGenerator(
         max_notional_per_trade=max_notional,
         safety_eps=safety_eps,
@@ -92,6 +94,7 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
         min_tte_secs=min_tte_secs,
         max_tte_secs=max_tte_secs,
         book_max_age_secs=book_max_age_secs,
+        iv_oracle=iv_oracle,
     )
     risk = RiskManager(
         max_notional_per_trade=max_notional,
@@ -120,6 +123,7 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
         for sym, c in binance_clients.items()
     ]
     tasks.append(asyncio.create_task(poly_ws.run(), name="poly-ws"))
+    tasks.append(asyncio.create_task(iv_oracle.run(), name="deribit-iv"))
 
     # Universe + eval loop
     markets = []
@@ -234,10 +238,18 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
             # even when no signals fire.
             if now - last_heartbeat > HEARTBEAT_SECS:
                 sigmas = {}
+                ivs = {}
+                drifts = {}
                 for sym, bc in binance_clients.items():
                     snap = bc.snapshot()
                     sigmas[sym] = snap.sigma_annual if snap else 0.0
-                sigma_str = " ".join(f"{s}σ={v:.3f}" for s, v in sigmas.items())
+                    drifts[sym] = snap.drift_annual if snap else 0.0
+                    iv_snap = iv_oracle.snapshot(sym)
+                    ivs[sym] = iv_snap.sigma_annual if iv_snap else 0.0
+                sigma_str = " ".join(
+                    f"{s}[σ={sigmas[s]:.3f} iv={ivs[s]:.3f} μ={drifts[s]:+.3f}]"
+                    for s in sigmas
+                )
                 log.info(
                     "HEARTBEAT eval=%d no-spot=%d no-book=%d warmup=%d markets=%d %s top-raw-gap=%.3f (%s)",
                     n_evaluated, n_skipped_no_spot, n_skipped_no_book, n_skipped_warmup,
