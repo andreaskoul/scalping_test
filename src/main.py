@@ -23,6 +23,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from .binance_ws import BinanceWS
+from .category import CategoryTracker
 from .execute import Executor
 from .poly_universe import fetch_active_markets
 from .poly_ws import PolyWS
@@ -101,6 +102,17 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
     )
     executor = Executor(paper=paper)
     await executor.setup(private_key=private_key)
+
+    category_tracker = CategoryTracker.load()
+    if category_tracker.stats:
+        n_blacklisted = sum(
+            1 for k, s in category_tracker.stats.items()
+            if s.fills >= category_tracker.min_fills and s.realised_pnl <= category_tracker.threshold
+        )
+        log.info(
+            "Loaded category tracker: %d known, %d currently blacklisted",
+            len(category_tracker.stats), n_blacklisted,
+        )
 
     # Background tasks
     tasks = [
@@ -191,6 +203,18 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
                 if signal is None:
                     continue
 
+                # Category blacklist: skip if we have history of losing
+                # money on similarly-shaped markets.
+                cat_key = CategoryTracker.category_key(
+                    market_question=market.question,
+                    symbol=market.symbol,
+                    time_to_expiry_secs=tte,
+                    exec_price=signal.price,
+                )
+                if category_tracker.is_blacklisted(cat_key):
+                    log.debug("Category blacklist suppressed signal: %s", cat_key)
+                    continue
+
                 allowed, reason = risk.check(
                     signal,
                     binance_ts=binance_tick.ts,
@@ -229,6 +253,20 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
         t.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
     await executor.close()
+
+    # Reconcile category tracker against newly-resolved markets so the
+    # next run inherits what this run learned.
+    try:
+        from .category import _rebuild_from_fills
+        rebuilt = await _rebuild_from_fills()
+        rebuilt.save()
+        log.info("Category tracker reconciled and saved.")
+    except Exception as exc:
+        log.warning("Category tracker reconcile failed: %s", exc)
+        try:
+            category_tracker.save()
+        except Exception:
+            pass
 
 
 def cli() -> None:

@@ -131,6 +131,7 @@ class SignalGenerator:
             strike=market.strike,
             time_to_expiry_secs=time_to_expiry,
             sigma_annual=sigma_used,
+            drift_annual=getattr(binance, "drift_annual", 0.0),
         )
 
         # --- try to BUY the YES (Up) token ---
