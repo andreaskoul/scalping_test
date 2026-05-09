@@ -80,12 +80,21 @@ class _State:
 class BinanceWS:
     """Subscribe to one symbol's public market data streams."""
 
+    # OFI drift is mildly expensive (deque walk) — cache its result
+    # since the underlying flow doesn't move on sub-second timescales.
+    _DRIFT_CACHE_TTL: float = 0.25  # 250ms
+
     def __init__(self, symbol: str, stale_threshold_secs: float = 2.0):
         self.symbol = symbol.lower()
         self.stale_threshold = stale_threshold_secs
         self._state = _State()
         self._ts: float = 0.0
         self._lock = asyncio.Lock()
+        # Most recent (computed_at, drift) — caller checks ttl.
+        self._drift_cache: tuple[float, float] = (0.0, 0.0)
+        # Set on every bookTicker arrival so the orchestrator can
+        # wake an event-driven eval loop instead of polling.
+        self.tick_event = asyncio.Event()
 
     def snapshot(self) -> BinanceTick | None:
         """Return latest tick or None if data is stale / not yet received."""
@@ -118,20 +127,23 @@ class BinanceWS:
         return max(SIGMA_MIN, min(SIGMA_MAX, math.sqrt(var_annual)))
 
     def _compute_drift(self, now: float) -> float:
+        # TTL cache — same OFI signal serves multiple market evaluations
+        # within a single eval-loop tick.
+        last_at, last_drift = self._drift_cache
+        if (now - last_at) < self._DRIFT_CACHE_TTL:
+            return last_drift
         cutoff = now - OFI_WINDOW_SECS
         signed = 0.0
         abs_vol = 0.0
-        # Drop entries older than the window while accumulating.
         flow = self._state.flow
         while flow and flow[0][0] < cutoff:
             flow.popleft()
         for _ts, signed_dv, abs_dv in flow:
             signed += signed_dv
             abs_vol += abs_dv
-        if abs_vol <= 0:
-            return 0.0
-        ratio = max(-1.0, min(1.0, signed / abs_vol))
-        return ratio * OFI_MAX_DRIFT
+        drift = 0.0 if abs_vol <= 0 else max(-1.0, min(1.0, signed / abs_vol)) * OFI_MAX_DRIFT
+        self._drift_cache = (now, drift)
+        return drift
 
     async def run(self) -> None:
         """Loop forever, reconnecting with back-off."""
@@ -172,6 +184,10 @@ class BinanceWS:
                 self._state.bid = float(data["b"])
                 self._state.ask = float(data["a"])
                 self._ts = now
+                # Wake the orchestrator. set() is a no-op if already set,
+                # so the cost when nothing is awaiting is essentially nil.
+                if not self.tick_event.is_set():
+                    self.tick_event.set()
             except (KeyError, ValueError, TypeError):
                 pass
             return

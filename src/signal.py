@@ -112,7 +112,8 @@ class SignalGenerator:
         # open time on Polymarket, not at our first observation. Anchoring
         # to spot at first observation produces a synthetic strike that
         # systematically biases p* away from 0.5 on pre-listed markets.
-        if self.skip_updown and ("up or down" in market.question.lower()):
+        # Flag is precomputed at universe-load time → no per-tick string ops.
+        if self.skip_updown and market.is_updown:
             return None
 
         # Skip if strike isn't anchored or spot is missing.

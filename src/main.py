@@ -9,6 +9,19 @@ Usage:
 
 Paper-trade mode runs the full stack against live feeds but never sends
 a real order. Logs every signal to fills.db for post-mortem analysis.
+
+Hot-path design:
+  - The eval loop is **event-driven**: it awaits the OR of (any Binance
+    bookTicker arrival, any Polymarket book change, idle timeout). On
+    wake, it evaluates only the markets whose underlying data could
+    have moved — Binance-symbol-dirty markets if a tick arrived,
+    Polymarket-token-dirty markets if a book changed. This replaces the
+    prior fixed 50 ms polling sleep and cuts mean reaction lag by ~25 ms.
+  - The universe refresh runs as a background task with atomic swap so
+    it doesn't block the event loop during the 1–3 s Gamma fetch.
+  - Heartbeat counters are cumulative across the heartbeat window
+    (previously they reset every iteration, which made the displayed
+    numbers meaningless).
 """
 
 import argparse
@@ -16,11 +29,12 @@ import asyncio
 import logging
 import os
 import time
-import aiohttp
 
 from dotenv import load_dotenv
 
 load_dotenv()
+
+import aiohttp
 
 from .binance_ws import BinanceWS
 from .category import CategoryTracker
@@ -28,13 +42,16 @@ from .deribit_iv import DeribitIV
 from .execute import Executor
 from .poly_universe import fetch_active_markets
 from .poly_ws import PolyWS
+from .pricing import implied_prob, SIGMA_MIN
 from .risk import RiskManager
 from .signal import SignalGenerator
 
 log = logging.getLogger(__name__)
 
 UNIVERSE_REFRESH_SECS = 30.0    # re-poll Gamma API for new markets
-EVAL_INTERVAL_SECS = 0.05       # main loop tick (20 Hz)
+DIRTY_POLL_SECS = 0.005         # 5ms backoff when nothing has changed
+FULL_SWEEP_SECS = 1.0           # backstop: re-evaluate everything at least once/sec
+HEARTBEAT_SECS = 30.0
 
 
 def _setup_logging(level: str = "INFO") -> None:
@@ -43,6 +60,55 @@ def _setup_logging(level: str = "INFO") -> None:
         datefmt="%H:%M:%S",
         level=getattr(logging, level.upper(), logging.INFO),
     )
+
+
+def _compute_blacklist_set(tracker: CategoryTracker) -> set[str]:
+    return {
+        k for k, s in tracker.stats.items()
+        if s.fills >= tracker.min_fills and s.realised_pnl <= tracker.threshold
+    }
+
+
+async def _universe_refresher(
+    session: aiohttp.ClientSession,
+    poly_ws: PolyWS,
+    binance_clients: dict,
+    state: dict,
+) -> None:
+    """Refresh the market universe in the background without blocking the
+    eval loop. Writes the new market list and per-symbol partition into
+    `state` atomically."""
+    while True:
+        try:
+            markets = await fetch_active_markets(session)
+            token_ids = []
+            by_symbol: dict[str, list] = {sym: [] for sym in binance_clients}
+            missing: dict[str, int] = {}
+            for m in markets:
+                token_ids.append(m.yes_token_id)
+                token_ids.append(m.no_token_id)
+                if m.symbol in by_symbol:
+                    by_symbol[m.symbol].append(m)
+                else:
+                    missing[m.symbol] = missing.get(m.symbol, 0) + 1
+            poly_ws.update_tokens(token_ids)
+            # Atomic swap — readers see the old or new list, never partial.
+            state["markets"] = markets
+            state["by_symbol"] = by_symbol
+            # Index from token_id → market, so book-change events can be
+            # mapped to the relevant market in O(1).
+            state["by_token"] = {m.yes_token_id: m for m in markets}
+            log.info("Universe refreshed: %d markets", len(markets))
+            if missing:
+                log.warning(
+                    "Skipping %d markets — no Binance feed for symbols: %s. "
+                    "Add to BINANCE_SYMBOLS env var to enable.",
+                    sum(missing.values()),
+                    ",".join(f"{s}({n})" for s, n in missing.items()),
+                )
+        except Exception as exc:
+            log.warning("Universe refresh failed: %s", exc)
+        await asyncio.sleep(UNIVERSE_REFRESH_SECS)
 
 
 async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0) -> None:
@@ -79,7 +145,6 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
     if duration_secs > 0:
         log.info("Will stop after %.0f seconds and print PnL summary.", duration_secs)
 
-    # Components
     binance_clients = {sym: BinanceWS(sym, stale_threshold_secs=binance_stale) for sym in symbols}
     poly_ws = PolyWS(token_ids=[], stale_threshold_secs=poly_stale)
     iv_oracle = DeribitIV(symbols=symbols)
@@ -107,178 +172,213 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
     await executor.setup(private_key=private_key)
 
     category_tracker = CategoryTracker.load()
+    blacklist = _compute_blacklist_set(category_tracker)
     if category_tracker.stats:
-        n_blacklisted = sum(
-            1 for k, s in category_tracker.stats.items()
-            if s.fills >= category_tracker.min_fills and s.realised_pnl <= category_tracker.threshold
-        )
         log.info(
             "Loaded category tracker: %d known, %d currently blacklisted",
-            len(category_tracker.stats), n_blacklisted,
+            len(category_tracker.stats), len(blacklist),
         )
 
-    # Background tasks
+    # Atomic universe state — refreshed by the background task.
+    universe_state: dict = {
+        "markets": [], "by_symbol": {sym: [] for sym in symbols}, "by_token": {},
+    }
+
+    session = aiohttp.ClientSession()
     tasks = [
         asyncio.create_task(c.run(), name=f"binance-{sym}")
         for sym, c in binance_clients.items()
     ]
     tasks.append(asyncio.create_task(poly_ws.run(), name="poly-ws"))
     tasks.append(asyncio.create_task(iv_oracle.run(), name="deribit-iv"))
+    tasks.append(asyncio.create_task(
+        _universe_refresher(session, poly_ws, binance_clients, universe_state),
+        name="universe",
+    ))
 
-    # Universe + eval loop
-    markets = []
-    last_refresh = 0.0
-    last_heartbeat = 0.0
-    HEARTBEAT_SECS = 30.0
-    start_ts = time.time()
-    deadline = start_ts + duration_secs if duration_secs > 0 else 0.0
+    # Heartbeat-window cumulative counters.
+    cum_eval = cum_no_spot = cum_no_book = cum_warmup = cum_signals = cum_fills = 0
+    top_edge_seen = (-1.0, "")
 
-    async with aiohttp.ClientSession() as session:
+    last_heartbeat = time.monotonic()
+    last_full_sweep = 0.0
+    deadline = (time.time() + duration_secs) if duration_secs > 0 else 0.0
+
+    try:
         while True:
             if risk.is_halted():
                 log.warning("Bot halted. Sleeping...")
                 await asyncio.sleep(5)
                 continue
 
-            now = time.time()
-            if deadline and now >= deadline:
+            now_wall = time.time()
+            if deadline and now_wall >= deadline:
                 log.info("Duration reached (%.0fs). Shutting down.", duration_secs)
                 break
 
-            # Refresh market universe periodically
-            if now - last_refresh > UNIVERSE_REFRESH_SECS:
-                markets = await fetch_active_markets(session)
-                token_ids = []
-                missing_symbols: dict[str, int] = {}
-                for m in markets:
-                    token_ids += [m.yes_token_id, m.no_token_id]
-                    if m.symbol not in binance_clients:
-                        missing_symbols[m.symbol] = missing_symbols.get(m.symbol, 0) + 1
-                poly_ws.update_tokens(token_ids)
-                last_refresh = now
-                log.info("Universe refreshed: %d markets", len(markets))
-                if missing_symbols:
-                    log.warning(
-                        "Skipping %d markets — no Binance feed for symbols: %s. "
-                        "Add to BINANCE_SYMBOLS env var to enable.",
-                        sum(missing_symbols.values()),
-                        ",".join(f"{s}({n})" for s, n in missing_symbols.items()),
-                    )
+            # ---- Drain dirty signals from Binance + Polymarket. ----
+            dirty_symbols = set()
+            for sym, c in binance_clients.items():
+                if c.tick_event.is_set():
+                    c.tick_event.clear()
+                    dirty_symbols.add(sym)
+            dirty_tokens = poly_ws.drain_dirty()
 
-            # Pipeline-state stats accumulated this iteration.
-            n_evaluated = n_skipped_no_spot = n_skipped_no_book = n_skipped_warmup = 0
-            top_edge_seen = (-1.0, "")  # (raw |p* - mid|, market_question)
+            now_mono = time.monotonic()
+            had_event = bool(dirty_symbols or dirty_tokens)
 
-            for market in markets:
-                binance_client = binance_clients.get(market.symbol)
-                if binance_client is None:
+            # If nothing happened recently, short-sleep instead of busy-looping.
+            # Periodic full sweep catches σ/IV/drift drift even on quiet feeds.
+            need_full_sweep = (now_mono - last_full_sweep) >= FULL_SWEEP_SECS
+            if not had_event and not need_full_sweep:
+                await asyncio.sleep(DIRTY_POLL_SECS)
+                continue
+
+            markets = universe_state["markets"]
+            by_symbol = universe_state["by_symbol"]
+            by_token = universe_state["by_token"]
+            if not markets:
+                # Universe not loaded yet — wait briefly and retry.
+                await asyncio.sleep(DIRTY_POLL_SECS)
+                continue
+
+            # ---- Candidate set: dirty-driven on events, full sweep otherwise. ----
+            if had_event and not need_full_sweep:
+                seen: set = set()
+                candidates: list = []
+                for sym in dirty_symbols:
+                    for m in by_symbol.get(sym, ()):
+                        if m.condition_id not in seen:
+                            seen.add(m.condition_id)
+                            candidates.append(m)
+                for tid in dirty_tokens:
+                    m = by_token.get(tid)
+                    if m is not None and m.condition_id not in seen:
+                        seen.add(m.condition_id)
+                        candidates.append(m)
+            else:
+                candidates = markets
+                last_full_sweep = now_mono
+
+            for market in candidates:
+                bc = binance_clients.get(market.symbol)
+                if bc is None:
                     continue
-                binance_tick = binance_client.snapshot()
-                if binance_tick is None:
-                    n_skipped_no_spot += 1
+                tick = bc.snapshot()
+                if tick is None:
+                    cum_no_spot += 1
                     continue
 
-                # Up/Down markets: use live Binance mid as the reference strike
+                # Up/Down markets — anchor strike to live spot first time.
                 if market.strike <= 0:
-                    market.strike = binance_tick.mid
+                    market.strike = tick.mid
 
                 yes_book = poly_ws.snapshot(market.yes_token_id)
                 if yes_book is None:
-                    n_skipped_no_book += 1
+                    cum_no_book += 1
                     continue
 
-                from .pricing import implied_prob, SIGMA_MIN
-                if binance_tick.sigma_annual <= SIGMA_MIN:
-                    n_skipped_warmup += 1
+                if tick.sigma_annual <= SIGMA_MIN:
+                    cum_warmup += 1
                     continue
 
-                # Track the largest raw mispricing visible right now —
-                # gives the user signal even if no trade fires.
-                tte = market.expiry_ts - now
-                if tte > 120 and market.strike > 0:
-                    p_star = implied_prob(binance_tick.mid, market.strike, tte, binance_tick.sigma_annual)
-                    poly_mid = (yes_book.best_bid + yes_book.best_ask) / 2
-                    raw = abs(p_star - poly_mid)
-                    if raw > top_edge_seen[0]:
-                        top_edge_seen = (raw, market.question)
+                cum_eval += 1
 
-                n_evaluated += 1
-                signal = signal_gen.evaluate(market, binance_tick, yes_book)
-                if signal is None:
-                    continue
-
-                # Category blacklist: skip if we have history of losing
-                # money on similarly-shaped markets.
+                # Pre-evaluate blacklist by category (cheap set lookup).
+                # Note: the exec_price isn't known yet, but the kind/tte
+                # buckets dominate the key — we use the book mid as a
+                # proxy.  If the bucket is blacklisted, skip without
+                # paying for evaluate().
+                tte = market.expiry_ts - now_wall
+                proxy_px = (yes_book.best_bid + yes_book.best_ask) * 0.5
                 cat_key = CategoryTracker.category_key(
-                    market_question=market.question,
-                    symbol=market.symbol,
-                    time_to_expiry_secs=tte,
-                    exec_price=signal.price,
+                    market.question, market.symbol, tte, proxy_px,
                 )
-                if category_tracker.is_blacklisted(cat_key):
-                    log.debug("Category blacklist suppressed signal: %s", cat_key)
+                if cat_key in blacklist:
                     continue
 
-                allowed, reason = risk.check(
-                    signal,
-                    binance_ts=binance_tick.ts,
-                    poly_ts=yes_book.ts,
+                signal = signal_gen.evaluate(market, tick, yes_book)
+                if signal is None:
+                    # Track the largest raw mispricing visible — diagnostic
+                    # for the heartbeat. No extra p* call: re-derive from
+                    # the inputs we already have. Keep this cheap by
+                    # gating on the heartbeat being due.
+                    if (now_mono - last_heartbeat) > (HEARTBEAT_SECS - 5):
+                        if tte > min_tte_secs and market.strike > 0:
+                            sigma_eff = max(tick.sigma_annual, sigma_floor)
+                            p = implied_prob(
+                                tick.mid, market.strike, tte, sigma_eff,
+                                drift_annual=tick.drift_annual,
+                            )
+                            raw = abs(p - proxy_px)
+                            if raw > top_edge_seen[0]:
+                                top_edge_seen = (raw, market.question)
+                    continue
+
+                cum_signals += 1
+                # Check blacklist again with actual fill price (may differ
+                # from book mid by enough to land in a different bucket).
+                cat_key = CategoryTracker.category_key(
+                    market.question, market.symbol, tte, signal.price,
                 )
+                if cat_key in blacklist:
+                    continue
+
+                allowed, reason = risk.check(signal, binance_ts=tick.ts, poly_ts=yes_book.ts)
                 if not allowed:
                     log.debug("Risk blocked: %s", reason)
                     continue
 
                 fill = await executor.execute(signal)
                 if fill:
+                    cum_fills += 1
                     risk.record_fill(fill.price * fill.size)
                 else:
                     risk.record_error()
 
-            # Heartbeat: state of the pipeline so the user sees progress
-            # even when no signals fire.
-            if now - last_heartbeat > HEARTBEAT_SECS:
-                sigmas = {}
-                ivs = {}
-                drifts = {}
+            # ---- Heartbeat (cumulative over window) ----
+            if (now_mono - last_heartbeat) > HEARTBEAT_SECS:
+                sigma_str_parts = []
                 for sym, bc in binance_clients.items():
                     snap = bc.snapshot()
-                    sigmas[sym] = snap.sigma_annual if snap else 0.0
-                    drifts[sym] = snap.drift_annual if snap else 0.0
+                    s = snap.sigma_annual if snap else 0.0
+                    d = snap.drift_annual if snap else 0.0
                     iv_snap = iv_oracle.snapshot(sym)
-                    ivs[sym] = iv_snap.sigma_annual if iv_snap else 0.0
-                sigma_str = " ".join(
-                    f"{s}[σ={sigmas[s]:.3f} iv={ivs[s]:.3f} μ={drifts[s]:+.3f}]"
-                    for s in sigmas
-                )
+                    iv = iv_snap.sigma_annual if iv_snap else 0.0
+                    sigma_str_parts.append(f"{sym}[σ={s:.3f} iv={iv:.3f} μ={d:+.3f}]")
                 log.info(
-                    "HEARTBEAT eval=%d no-spot=%d no-book=%d warmup=%d markets=%d %s top-raw-gap=%.3f (%s)",
-                    n_evaluated, n_skipped_no_spot, n_skipped_no_book, n_skipped_warmup,
-                    len(markets), sigma_str,
+                    "HEARTBEAT eval=%d signals=%d fills=%d no-spot=%d no-book=%d warmup=%d "
+                    "markets=%d %s top-raw-gap=%.3f (%s)",
+                    cum_eval, cum_signals, cum_fills,
+                    cum_no_spot, cum_no_book, cum_warmup, len(markets),
+                    " ".join(sigma_str_parts),
                     top_edge_seen[0], top_edge_seen[1][:50],
                 )
-                last_heartbeat = now
+                cum_eval = cum_no_spot = cum_no_book = cum_warmup = cum_signals = cum_fills = 0
+                top_edge_seen = (-1.0, "")
+                last_heartbeat = now_mono
 
-            await asyncio.sleep(EVAL_INTERVAL_SECS)
+    finally:
+        # Graceful shutdown — cancel background tasks, close DB, print PnL.
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await session.close()
+        await executor.close()
 
-    # Graceful shutdown — cancel background tasks, close DB, print PnL.
-    for t in tasks:
-        t.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
-    await executor.close()
-
-    # Reconcile category tracker against newly-resolved markets so the
-    # next run inherits what this run learned.
-    try:
-        from .category import _rebuild_from_fills
-        rebuilt = await _rebuild_from_fills()
-        rebuilt.save()
-        log.info("Category tracker reconciled and saved.")
-    except Exception as exc:
-        log.warning("Category tracker reconcile failed: %s", exc)
+        # Reconcile category tracker against newly-resolved markets so the
+        # next run inherits what this run learned.
         try:
-            category_tracker.save()
-        except Exception:
-            pass
+            from .category import _rebuild_from_fills
+            rebuilt = await _rebuild_from_fills()
+            rebuilt.save()
+            log.info("Category tracker reconciled and saved.")
+        except Exception as exc:
+            log.warning("Category tracker reconcile failed: %s", exc)
+            try:
+                category_tracker.save()
+            except Exception:
+                pass
 
 
 def cli() -> None:
@@ -314,7 +414,6 @@ def cli() -> None:
     except KeyboardInterrupt:
         print("\nInterrupted.")
 
-    # Always print the PnL summary on exit (clean stop or Ctrl-C).
     print("\n--- Final PnL Summary ---")
     try:
         from .pnl import report
