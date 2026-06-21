@@ -39,12 +39,14 @@ import logging
 import math
 import re
 import time
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import aiohttp
 
 from .pricing import (
+    implied_prob,
     taker_fee_per_share,
     maker_rebate_per_share,
     FEE_RATE_CRYPTO,
@@ -86,6 +88,7 @@ class BacktestConfig:
     # One entry per market (independent samples) unless overridden.
     all_fills: bool = False
     trade_updown: bool = False           # Up/Down strikes are synthetic; off
+    debug: bool = False                  # print why markets/minutes were dropped
 
 
 @dataclass
@@ -297,6 +300,9 @@ def _build_signal_generator(cfg: BacktestConfig) -> SignalGenerator:
 
 async def backtest(cfg: BacktestConfig) -> list[SimFill]:
     fills: list[SimFill] = []
+    # Diagnostics: where do markets/minutes get dropped? Separates
+    # "no gross edge existed" from "edge eaten by costs/overlays/gates".
+    diag = Counter()
     sig_gen = _build_signal_generator(cfg)
     headers = {"User-Agent": "Mozilla/5.0"}
     async with aiohttp.ClientSession(headers=headers) as session:
@@ -304,6 +310,7 @@ async def backtest(cfg: BacktestConfig) -> list[SimFill]:
         markets = await _fetch_resolved_markets(session, cfg.days)
         log.info("Found %d resolved BTC/ETH threshold markets", len(markets))
         markets = markets[: cfg.max_markets]
+        diag["markets_seen"] = len(markets)
 
         for i, m in enumerate(markets):
             q = m.get("question", "")
@@ -342,24 +349,33 @@ async def backtest(cfg: BacktestConfig) -> list[SimFill]:
             if not yes_token:
                 continue
 
+            is_updown = not is_threshold
+            if is_updown and not cfg.trade_updown:
+                diag["mkt_skip_updown"] += 1
+                continue
+
             history = await _fetch_token_history(session, yes_token, start_ts, expiry)
             if len(history) < 5:
+                diag["mkt_no_history"] += 1
                 continue
             klines = await _fetch_binance_klines(session, symbol, start_ts, expiry)
             if len(klines) < 5:
+                diag["mkt_no_klines"] += 1
                 continue
             sigmas = _rolling_sigma(klines, cfg.sigma_window_secs)
             kline_by_ts = {ts: c for ts, c in klines}
             kline_keys = sorted(kline_by_ts)
 
             # For Up/Down markets the strike is the Binance close at start_ts.
-            is_updown = not is_threshold
             if is_updown:
                 idx = _bisect_le(kline_keys, start_ts)
                 if idx < 0:
                     continue
                 strike = kline_by_ts[kline_keys[idx]]
 
+            diag["mkt_evaluable"] += 1
+            mkt_max_raw = 0.0     # best gross edge (no eps/wedge) seen this market
+            mkt_fired = False
             for poly_ts, poly_price in history:
                 if poly_price <= 0 or poly_price >= 1:
                     continue
@@ -376,15 +392,30 @@ async def backtest(cfg: BacktestConfig) -> list[SimFill]:
                 if not sigma or sigma <= 0.05:
                     continue
 
+                diag["min_evaluable"] += 1
+                half = cfg.half_spread
+                best_bid = max(1e-4, round(poly_price - half, 4))
+                best_ask = min(1 - 1e-4, round(poly_price + half, 4))
+
+                # Reference gross edge with NO overlays/eps — just model vs the
+                # crossed price and the fee. Tells us whether any edge existed
+                # at all, independent of the live haircuts and price gates.
+                p_raw = implied_prob(spot, strike, tte, sigma)
+                raw_buy = p_raw - best_ask - taker_fee_per_share(best_ask, cfg.fee_rate)
+                raw_sell = best_bid - p_raw - taker_fee_per_share(best_bid, cfg.fee_rate)
+                raw_edge = max(raw_buy, raw_sell)
+                if raw_edge > 0:
+                    diag["min_raw_edge_pos"] += 1
+                    mkt_max_raw = max(mkt_max_raw, raw_edge)
+                if best_ask > sig_gen.price_max or best_bid < sig_gen.price_min:
+                    diag["min_price_gated"] += 1
+
                 # Synthesise a top-of-book around the displayed price and drive
                 # the *real* signal generator. expiry_ts is offset from the
                 # current wall clock so evaluate()'s `expiry_ts - time.time()`
                 # reproduces the historical tte; book.ts is fresh so the
                 # staleness gate passes.
                 now = time.time()
-                half = cfg.half_spread
-                best_bid = max(1e-4, round(poly_price - half, 4))
-                best_ask = min(1 - 1e-4, round(poly_price + half, 4))
                 yes_book = BookSnapshot(
                     token_id=yes_token,
                     best_bid=best_bid, best_ask=best_ask,
@@ -409,6 +440,8 @@ async def backtest(cfg: BacktestConfig) -> list[SimFill]:
                 sig = sig_gen.evaluate(pm, tick, yes_book, carry_annual=0.0)
                 if sig is None:
                     continue
+                diag["min_fired"] += 1
+                mkt_fired = True
 
                 # Realised PnL at resolution. Maker fills earn the rebate;
                 # taker fills pay the parabolic fee — mirror the live edge.
@@ -441,11 +474,44 @@ async def backtest(cfg: BacktestConfig) -> list[SimFill]:
                 if not cfg.all_fills:
                     break
 
+            if mkt_max_raw > 0:
+                diag["mkt_with_raw_edge"] += 1
+            if mkt_fired:
+                diag["mkt_fired"] += 1
+            elif mkt_max_raw > 0:
+                # A gross edge existed but the live haircuts/gates rejected it.
+                diag["mkt_edge_eaten"] += 1
+
             if (i + 1) % 10 == 0:
                 log.info("...processed %d/%d markets, %d sim-fills so far",
                          i + 1, len(markets), len(fills))
 
+    if cfg.debug or not fills:
+        _print_diag(diag)
     return fills
+
+
+def _print_diag(diag: "Counter") -> None:
+    print("\n--- Diagnostics (where candidates were dropped) ---")
+    print(f"  markets seen:            {diag['markets_seen']}")
+    print(f"    skipped Up/Down:       {diag['mkt_skip_updown']}")
+    print(f"    no Polymarket history: {diag['mkt_no_history']}")
+    print(f"    no Binance klines:     {diag['mkt_no_klines']}  "
+          f"(HTTP 451 if geo-blocked)")
+    print(f"    evaluable:             {diag['mkt_evaluable']}")
+    print(f"      had a gross edge:    {diag['mkt_with_raw_edge']}")
+    print(f"      fired a fill:        {diag['mkt_fired']}")
+    print(f"      edge eaten by costs/overlays/gates: {diag['mkt_edge_eaten']}")
+    print(f"  minutes evaluable:       {diag['min_evaluable']}")
+    print(f"    raw gross edge > 0:    {diag['min_raw_edge_pos']}")
+    print(f"    price-gated (ask>max or bid<min): {diag['min_price_gated']}")
+    print(f"    actually fired:        {diag['min_fired']}")
+    if diag["mkt_evaluable"] and not diag["mkt_fired"]:
+        if diag["mkt_with_raw_edge"]:
+            print("  → Verdict: gross edge existed but live costs/overlays/price"
+                  " gates removed it (this is the realistic correction).")
+        else:
+            print("  → Verdict: no gross edge in the window even before costs.")
 
 
 def _bisect_le(sorted_list: list[float], target: float) -> int:
@@ -532,6 +598,8 @@ def cli() -> None:
                         help="record every qualifying minute, not one entry per market")
     parser.add_argument("--trade-updown", action="store_true",
                         help="include Up/Down markets (synthetic strike; off by default)")
+    parser.add_argument("--debug", action="store_true",
+                        help="always print the drop-reason diagnostics")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
 
@@ -548,6 +616,7 @@ def cli() -> None:
         half_spread=args.half_spread,
         all_fills=args.all_fills,
         trade_updown=args.trade_updown,
+        debug=args.debug,
     )
     fills = asyncio.run(backtest(cfg))
     _summarize(fills)
