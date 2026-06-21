@@ -4,19 +4,32 @@ Historical backtest harness.
 For each recently-resolved BTC/ETH threshold market:
   1. Pull the YES-token price history from Polymarket at 1-minute fidelity.
   2. Pull Binance 1-minute klines for the same window.
-  3. For every minute, recompute p* with the same signal logic and check
-     whether a buy/sell edge would have fired.
+  3. For every minute, synthesise a bid/ask book around the displayed price
+     and drive the *real* `SignalGenerator.evaluate()` — the exact same code
+     path the live bot runs — so every overlay (favourite-longshot wedge,
+     vol-smile σ bump, funding carry, fractional-Kelly sizing, maker/rebate
+     path, effective-spread + taker-fee costs) is exercised identically.
   4. Mark each hypothetical fill against the resolution outcome
      (YES → 1.0, NO → 0.0) and aggregate PnL.
 
-This is an *upper bound* on profit: it assumes (a) we cross the displayed
-last-trade price (no slippage past one tick), (b) we win the queue against
-co-located bots, (c) realized vol used for sizing is the same as our σ
-estimator would have produced live. Real performance is strictly worse.
+What this models now (vs. the old last-trade-price harness):
+  - Fills cross a synthesised spread (BUY pays the ask, SELL hits the bid),
+    so the half-spread cost is no longer ignored.
+  - Taker fee / maker rebate are applied by the live signal code.
+  - By default at most ONE entry per market is taken (the first qualifying
+    minute) so the headline win-rate is over *independent* markets, not the
+    same outcome counted once per minute. Use --all-fills to see every minute.
+
+Still optimistic — real performance is worse — because we cannot replay:
+  - true historical book depth / queue position (we assume top-of-book fill),
+  - the OFI/ML/OBI microstructure overlays (no historical L2 + trade tape),
+  - live funding/IV oracles (carry and Deribit-IV σ default to off here).
+These gaps are reported in the summary so the number is not over-trusted.
 
 Usage:
   python -m src.backtest --days 3
-  python -m src.backtest --days 7 --max-markets 50 --safety-eps 0.005
+  python -m src.backtest --days 7 --max-markets 50 --half-spread 0.01
+  python -m src.backtest --days 7 --all-fills        # every minute, not 1/market
 """
 
 import argparse
@@ -31,7 +44,16 @@ from datetime import datetime, timezone
 
 import aiohttp
 
-from .pricing import implied_prob, taker_fee_per_share, FEE_RATE_CRYPTO
+from .pricing import (
+    taker_fee_per_share,
+    maker_rebate_per_share,
+    FEE_RATE_CRYPTO,
+)
+from .config import Settings
+from .signal import SignalGenerator, Side
+from .poly_universe import PolyMarket
+from .poly_ws import BookSnapshot
+from .binance_ws import BinanceTick
 
 log = logging.getLogger(__name__)
 
@@ -54,10 +76,16 @@ class BacktestConfig:
     days: int = 3
     max_markets: int = 100
     max_notional: float = 25.0
-    safety_eps: float = 0.003
+    safety_eps: float | None = None      # None → use the live Config value
     fee_rate: float = FEE_RATE_CRYPTO
     sigma_window_secs: float = 60 * 60   # 1h trailing realized vol
-    min_tte_secs: float = 120.0          # don't trade in last 2 min
+    # Synthesised half-spread (price units) applied either side of the
+    # displayed Polymarket price, since prices-history gives no L2 book.
+    # 0.01 = one cent each side (2c wide), a realistic crypto-market quote.
+    half_spread: float = 0.01
+    # One entry per market (independent samples) unless overridden.
+    all_fills: bool = False
+    trade_updown: bool = False           # Up/Down strikes are synthetic; off
 
 
 @dataclass
@@ -73,6 +101,7 @@ class SimFill:
     fee: float
     resolution: float       # 1.0 or 0.0
     pnl: float
+    is_maker: bool = False
 
 
 def _parse_strike(question: str) -> float:
@@ -229,8 +258,46 @@ def _resolution(market: dict) -> float | None:
         return None
 
 
+def _build_signal_generator(cfg: BacktestConfig) -> SignalGenerator:
+    """Construct a SignalGenerator from the live Config so the backtest fires
+    on exactly the same overlay stack as `main.py`. The microstructure engine,
+    IV oracle and poly_ws (walk-book) are left out because we cannot replay
+    historical L2 depth / trade flow / Deribit IV — those overlays no-op."""
+    lc = Settings.from_env()
+    return SignalGenerator(
+        max_notional_per_trade=cfg.max_notional,
+        safety_eps=cfg.safety_eps if cfg.safety_eps is not None else lc.safety_eps,
+        cooldown_secs=0.0,                 # replay has no wall-clock gap; we
+                                           # dedup per-market ourselves instead
+        price_min=lc.price_min,
+        price_max=lc.price_max,
+        sigma_floor=lc.sigma_floor,
+        skip_updown=not cfg.trade_updown,
+        min_tte_secs=lc.min_tte_secs,
+        max_tte_secs=lc.max_tte_secs,
+        book_max_age_secs=lc.book_max_age_secs,
+        iv_oracle=None,
+        poly_ws=None,
+        effective_spread_mult=lc.effective_spread_mult,
+        max_walk_slippage=lc.max_walk_slippage,
+        longshot_tilt_mult=lc.longshot_tilt_mult,
+        skew_coef=lc.skew_coef,
+        sell_price_min=lc.sell_price_min,
+        micro_engine=None,
+        ml_overlay=lc.ml_overlay,          # no-ops without micro_engine/features
+        ml_weight=lc.ml_weight,
+        obi_veto=lc.obi_veto,
+        obi_veto_threshold=lc.obi_veto_threshold,
+        kelly_enabled=lc.kelly_enabled,
+        kelly_fraction=lc.kelly_fraction,
+        maker_enabled=lc.maker_enabled,
+        maker_join_ticks=lc.maker_join_ticks,
+    )
+
+
 async def backtest(cfg: BacktestConfig) -> list[SimFill]:
     fills: list[SimFill] = []
+    sig_gen = _build_signal_generator(cfg)
     headers = {"User-Agent": "Mozilla/5.0"}
     async with aiohttp.ClientSession(headers=headers) as session:
         log.info("Fetching resolved markets from last %d day(s)...", cfg.days)
@@ -286,15 +353,18 @@ async def backtest(cfg: BacktestConfig) -> list[SimFill]:
             kline_keys = sorted(kline_by_ts)
 
             # For Up/Down markets the strike is the Binance close at start_ts.
-            if not is_threshold:
+            is_updown = not is_threshold
+            if is_updown:
                 idx = _bisect_le(kline_keys, start_ts)
                 if idx < 0:
                     continue
                 strike = kline_by_ts[kline_keys[idx]]
 
             for poly_ts, poly_price in history:
+                if poly_price <= 0 or poly_price >= 1:
+                    continue
                 tte = expiry - poly_ts
-                if tte < cfg.min_tte_secs:
+                if tte <= 0:
                     continue
                 # Snap to closest binance close <= poly_ts
                 idx = _bisect_le(kline_keys, poly_ts)
@@ -306,45 +376,70 @@ async def backtest(cfg: BacktestConfig) -> list[SimFill]:
                 if not sigma or sigma <= 0.05:
                     continue
 
-                p_star = implied_prob(spot, strike, tte, sigma)
+                # Synthesise a top-of-book around the displayed price and drive
+                # the *real* signal generator. expiry_ts is offset from the
+                # current wall clock so evaluate()'s `expiry_ts - time.time()`
+                # reproduces the historical tte; book.ts is fresh so the
+                # staleness gate passes.
+                now = time.time()
+                half = cfg.half_spread
+                best_bid = max(1e-4, round(poly_price - half, 4))
+                best_ask = min(1 - 1e-4, round(poly_price + half, 4))
+                yes_book = BookSnapshot(
+                    token_id=yes_token,
+                    best_bid=best_bid, best_ask=best_ask,
+                    bid_size=1e6, ask_size=1e6,   # deep enough to fill at top
+                    ts=time.monotonic(),
+                )
+                tick = BinanceTick(
+                    symbol=sym_lower, bid=spot, ask=spot, mid=spot,
+                    sigma_annual=sigma, ts=time.monotonic(), drift_annual=0.0,
+                )
+                pm = PolyMarket(
+                    condition_id=m.get("conditionId", ""),
+                    question=q,
+                    yes_token_id=yes_token, no_token_id="",
+                    yes_price=poly_price, no_price=1.0 - poly_price,
+                    strike=strike, expiry_ts=now + tte,
+                    tick_size=0.01, symbol=sym_lower,
+                    is_updown=is_updown, is_threshold=is_threshold,
+                    fee_rate=cfg.fee_rate, fee_exponent=1.0,
+                )
 
-                # Approx: use last-trade price as both bid and ask (no spread info).
-                # Apply taker fee at the price we cross.
-                fee_per_share = taker_fee_per_share(poly_price, cfg.fee_rate)
-
-                edge_buy = p_star - poly_price - fee_per_share - cfg.safety_eps
-                edge_sell = poly_price - p_star - fee_per_share - cfg.safety_eps
-                if max(edge_buy, edge_sell) <= 0:
+                sig = sig_gen.evaluate(pm, tick, yes_book, carry_annual=0.0)
+                if sig is None:
                     continue
 
-                if edge_buy > edge_sell:
-                    side, edge = "BUY", edge_buy
+                # Realised PnL at resolution. Maker fills earn the rebate;
+                # taker fills pay the parabolic fee — mirror the live edge.
+                size = sig.size
+                if sig.is_maker:
+                    cost = -maker_rebate_per_share(sig.price)   # negative = credit
                 else:
-                    side, edge = "SELL", edge_sell
-
-                if poly_price <= 0 or poly_price >= 1:
-                    continue
-                size = round(cfg.max_notional / poly_price, 2)
-
-                # Realized PnL at resolution.
-                if side == "BUY":
-                    pnl = (resolution - poly_price) * size - fee_per_share * size
+                    cost = taker_fee_per_share(sig.price, cfg.fee_rate, 1.0)
+                if sig.side == Side.BUY:
+                    pnl = (resolution - sig.price) * size - cost * size
                 else:
-                    pnl = (poly_price - resolution) * size - fee_per_share * size
+                    pnl = (sig.price - resolution) * size - cost * size
 
                 fills.append(SimFill(
                     market_question=q,
                     symbol=sym_lower,
                     ts=poly_ts,
-                    side=side,
-                    price=poly_price,
+                    side=sig.side.value,
+                    price=sig.price,
                     size=size,
-                    p_star=p_star,
-                    edge=edge,
-                    fee=fee_per_share * size,
+                    p_star=sig.p_star,
+                    edge=sig.edge,
+                    fee=cost * size,
                     resolution=resolution,
                     pnl=pnl,
+                    is_maker=sig.is_maker,
                 ))
+
+                # One independent sample per market unless --all-fills.
+                if not cfg.all_fills:
+                    break
 
             if (i + 1) % 10 == 0:
                 log.info("...processed %d/%d markets, %d sim-fills so far",
@@ -381,17 +476,38 @@ def _summarize(fills: list[SimFill]) -> None:
     for f in fills:
         by_market.setdefault(f.market_question, []).append(f)
 
+    n_maker = sum(1 for f in fills if f.is_maker)
     print(f"\n=== Backtest summary ({n} sim-fills across {len(by_market)} markets) ===")
     print(f"Gross notional:  ${total_notional:,.2f}")
-    print(f"Total fees:      ${total_fee:.4f}")
+    print(f"Total fees/rebate:${total_fee:+.4f}  (negative = net rebate)")
     print(f"Realized PnL:    ${total_pnl:+,.4f}")
-    print(f"Win rate:        {len(wins)/n*100:.1f}% ({len(wins)}W / {len(losses)}L)")
+    print(f"Win rate:        {len(wins)/n*100:.1f}% ({len(wins)}W / {len(losses)}L)  [per-fill]")
+    print(f"Maker / taker:   {n_maker} maker / {n - n_maker} taker fills")
     print(f"Mean edge fired: {sum(f.edge for f in fills)/n*100:+.2f}%")
     if wins:
         print(f"Avg win:         ${sum(f.pnl for f in wins)/len(wins):+.3f}")
     if losses:
         print(f"Avg loss:        ${sum(f.pnl for f in losses)/len(losses):+.3f}")
     print(f"Return on notional: {total_pnl/total_notional*100:+.2f}%" if total_notional else "")
+
+    # --- Per-market view: the statistically honest sample size ---
+    mkt_pnls = [sum(f.pnl for f in fs) for fs in by_market.values()]
+    m = len(mkt_pnls)
+    mkt_wins = sum(1 for p in mkt_pnls if p > 0)
+    mean_mkt = sum(mkt_pnls) / m
+    var = sum((p - mean_mkt) ** 2 for p in mkt_pnls) / m if m > 1 else 0.0
+    stderr = math.sqrt(var / m) if m > 0 else 0.0
+    print(f"\n--- Per-market (independent samples, N={m}) ---")
+    print(f"Markets profitable: {mkt_wins}/{m} ({mkt_wins/m*100:.1f}%)")
+    print(f"PnL per market:     ${mean_mkt:+.3f} ± ${stderr:.3f} (1 s.e.)")
+    print(f"95% CI on mean:     [${mean_mkt - 1.96*stderr:+.3f}, ${mean_mkt + 1.96*stderr:+.3f}]")
+    if mean_mkt - 1.96 * stderr <= 0 <= mean_mkt + 1.96 * stderr:
+        print("  ⚠ CI straddles 0 — edge is NOT statistically distinguishable from noise.")
+
+    print("\nCaveats (real PnL is worse than this):")
+    print("  - top-of-book fill assumed; no queue/latency model")
+    print("  - OFI/ML/OBI microstructure overlays inactive (no historical L2/tape)")
+    print("  - funding carry & Deribit-IV σ off (oracles not replayed)")
 
     # Top winners / losers
     fills_by_pnl = sorted(fills, key=lambda f: f.pnl)
@@ -408,7 +524,14 @@ def cli() -> None:
     parser.add_argument("--days", type=int, default=3, help="lookback window")
     parser.add_argument("--max-markets", type=int, default=100)
     parser.add_argument("--max-notional", type=float, default=25.0)
-    parser.add_argument("--safety-eps", type=float, default=0.003)
+    parser.add_argument("--safety-eps", type=float, default=None,
+                        help="override edge cushion (default: live Config value)")
+    parser.add_argument("--half-spread", type=float, default=0.01,
+                        help="synthesised half-spread each side of displayed price")
+    parser.add_argument("--all-fills", action="store_true",
+                        help="record every qualifying minute, not one entry per market")
+    parser.add_argument("--trade-updown", action="store_true",
+                        help="include Up/Down markets (synthetic strike; off by default)")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
 
@@ -422,6 +545,9 @@ def cli() -> None:
         max_markets=args.max_markets,
         max_notional=args.max_notional,
         safety_eps=args.safety_eps,
+        half_spread=args.half_spread,
+        all_fills=args.all_fills,
+        trade_updown=args.trade_updown,
     )
     fills = asyncio.run(backtest(cfg))
     _summarize(fills)
