@@ -24,6 +24,8 @@ and raw ML direction is unreliable on binaries (arXiv:2511.15960), so we use:
 
 from __future__ import annotations
 
+import bisect
+import itertools
 import json
 import logging
 import math
@@ -127,6 +129,57 @@ def impulse_fade_bias(
     if abs(f.move_window_usd) < 2.0 * min_move_usd:
         return 0
     return -1 if f.move_window_usd > 0 else 1
+
+
+class MicroReplay:
+    """Rebuild MicroFeatures from a historical trade tape (Binance aggTrades).
+
+    Lets the backtest exercise the OFI/ML/momentum overlays on real history —
+    aggTrades are downloadable even though full L2 depth is not, and OFI is the
+    dominant feature (Deep et al.), so this recovers most of the microstructure
+    signal. Trades are (ts, price, signed_dollar_vol, abs_dollar_vol), sorted.
+    """
+
+    def __init__(self, trades: list[tuple[float, float, float, float]]):
+        trades = sorted(trades, key=lambda t: t[0])
+        self.ts = [t[0] for t in trades]
+        self.px = [t[1] for t in trades]
+        self._cum_s = list(itertools.accumulate(t[2] for t in trades))
+        self._cum_a = list(itertools.accumulate(t[3] for t in trades))
+
+    def _idx_le(self, t: float) -> int:
+        return bisect.bisect_right(self.ts, t) - 1
+
+    def price_at(self, t: float) -> float:
+        i = self._idx_le(t)
+        return self.px[i] if i >= 0 else 0.0
+
+    def ofi(self, t: float, window: float = 30.0) -> float:
+        hi = self._idx_le(t)
+        if hi < 0:
+            return 0.0
+        lo = bisect.bisect_left(self.ts, t - window)
+        if lo > hi:
+            return 0.0
+        signed = self._cum_s[hi] - (self._cum_s[lo - 1] if lo > 0 else 0.0)
+        absv = self._cum_a[hi] - (self._cum_a[lo - 1] if lo > 0 else 0.0)
+        return 0.0 if absv <= 0 else max(-1.0, min(1.0, signed / absv))
+
+    def features(
+        self, t: float, spot: float, sigma: float, tte: float,
+        ofi_window: float = 30.0, mom_window: float = 180.0,
+    ) -> MicroFeatures:
+        p0, pf, ps = self.price_at(t), self.price_at(t - 5), self.price_at(t - 60)
+        pm = self.price_at(t - mom_window)
+        ret_fast = math.log(p0 / pf) if p0 > 0 and pf > 0 else 0.0
+        ret_slow = math.log(p0 / ps) if p0 > 0 and ps > 0 else 0.0
+        return MicroFeatures(
+            ofi=self.ofi(t, ofi_window),
+            ret_fast=ret_fast, ret_slow=ret_slow,
+            rvol=sigma, spread_rel=0.0,
+            move_window_usd=(spot - pm) if pm > 0 else 0.0,
+            secs_to_expiry=tte,
+        )
 
 
 @dataclass

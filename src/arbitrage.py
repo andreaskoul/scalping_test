@@ -371,6 +371,26 @@ def find_bucket_arbs(
     return out
 
 
+def combo_realized_pnl(combo: ComboArb, res_by_market: dict[str, float]) -> float | None:
+    """Realised PnL of a multi-leg combo given each market's YES outcome.
+
+    A YES token pays $1 if its market resolved YES (res=1), a NO token pays $1
+    if it resolved NO (res=0). Returns None if any leg's market is unresolved.
+    Used by the backtest to score arb fills against actual settlement.
+    """
+    total = 0.0
+    for leg in combo.legs:
+        res = res_by_market.get(leg.market.condition_id)
+        if res is None:
+            return None
+        payoff = res if leg.token_id == leg.market.yes_token_id else (1.0 - res)
+        if leg.side == "BUY":
+            total += (payoff - leg.price) * leg.size - leg.fee_per_share * leg.size
+        else:
+            total += (leg.price - payoff) * leg.size - leg.fee_per_share * leg.size
+    return total
+
+
 def scan_combos(
     markets: list[PolyMarket],
     poly_ws: PolyWS,

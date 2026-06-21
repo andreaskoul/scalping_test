@@ -37,6 +37,7 @@ import asyncio
 import json
 import logging
 import math
+import random
 import re
 import time
 from collections import Counter
@@ -56,12 +57,14 @@ from .signal import SignalGenerator, Side
 from .poly_universe import PolyMarket
 from .poly_ws import BookSnapshot
 from .binance_ws import BinanceTick
+from .microstructure import MicroReplay, MicrostructureEngine, DirectionalModel
 
 log = logging.getLogger(__name__)
 
 GAMMA_API = "https://gamma-api.polymarket.com/markets"
 CLOB_HISTORY = "https://clob.polymarket.com/prices-history"
 BINANCE_KLINES = "https://api.binance.com/api/v3/klines"
+BINANCE_AGGTRADES = "https://api.binance.com/api/v3/aggTrades"
 
 THRESHOLD_RE = re.compile(
     r"(?:bitcoin|btc|ethereum|eth)\s+(?:above|reach(?:es)?|over|>=?)", re.I
@@ -89,6 +92,10 @@ class BacktestConfig:
     all_fills: bool = False
     trade_updown: bool = False           # Up/Down strikes are synthetic; off
     debug: bool = False                  # print why markets/minutes were dropped
+    # F2 residuals:
+    carry_annual: float = 0.0            # perp-funding carry fed to the pricer
+    maker_fill_prob: float = 1.0         # P(resting maker order is hit); <1 = honest
+    ofi_replay: bool = False             # replay Binance aggTrades → OFI/ML overlay
 
 
 @dataclass
@@ -262,6 +269,53 @@ async def _fetch_binance_klines(
     return out
 
 
+async def _fetch_agg_trades(
+    session: aiohttp.ClientSession, symbol: str, start_ts: float, end_ts: float
+) -> list[tuple[float, float, float, float]]:
+    """Return [(ts, price, signed_dollar_vol, abs_dollar_vol), ...].
+
+    Binance aggTrades caps a query at 1h span / 1000 rows, so we chunk by hour
+    and paginate within a chunk by advancing startTime past the last id.
+    m=true means the buyer was the maker → the aggressor sold → signed flow is
+    negative (matches binance_ws's live OFI sign convention)."""
+    out: list[tuple[float, float, float, float]] = []
+    chunk = 3600 * 1000
+    cur = int(start_ts * 1000)
+    end_ms = int(end_ts * 1000)
+    while cur < end_ms:
+        chunk_end = min(cur + chunk, end_ms)
+        sub = cur
+        while sub < chunk_end:
+            params = {"symbol": symbol.upper(), "startTime": sub, "endTime": chunk_end, "limit": 1000}
+            try:
+                async with session.get(
+                    BINANCE_AGGTRADES, params=params,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as r:
+                    if r.status != 200:
+                        return out
+                    rows = await r.json()
+            except Exception:
+                return out
+            if not rows:
+                break
+            for t in rows:
+                try:
+                    ts = t["T"] / 1000.0
+                    price = float(t["p"])
+                    qty = float(t["q"])
+                    sign = -1.0 if t.get("m") else 1.0
+                    dv = price * qty
+                    out.append((ts, price, sign * dv, dv))
+                except (KeyError, ValueError, TypeError):
+                    continue
+            if len(rows) < 1000:
+                break
+            sub = rows[-1]["T"] + 1
+        cur = chunk_end
+    return out
+
+
 def _rolling_sigma(closes: list[tuple[float, float]], lookback_secs: float) -> dict[float, float]:
     """For each timestamp, return annualised σ from prior log-returns within lookback."""
     out: dict[float, float] = {}
@@ -299,11 +353,11 @@ def _resolution(market: dict) -> float | None:
         return None
 
 
-def _build_signal_generator(cfg: BacktestConfig) -> SignalGenerator:
+def _build_signal_generator(cfg: BacktestConfig, micro_engine=None) -> SignalGenerator:
     """Construct a SignalGenerator from the live Config so the backtest fires
-    on exactly the same overlay stack as `main.py`. The microstructure engine,
-    IV oracle and poly_ws (walk-book) are left out because we cannot replay
-    historical L2 depth / trade flow / Deribit IV — those overlays no-op."""
+    on exactly the same overlay stack as `main.py`. With --ofi-replay a
+    micro_engine is supplied and OFI/ML/momentum overlays activate off the
+    replayed aggTrade tape; otherwise (no historical L2/tape) they no-op."""
     lc = Settings.from_env()
     return SignalGenerator(
         max_notional_per_trade=cfg.max_notional,
@@ -324,7 +378,7 @@ def _build_signal_generator(cfg: BacktestConfig) -> SignalGenerator:
         longshot_tilt_mult=lc.longshot_tilt_mult,
         skew_coef=lc.skew_coef,
         sell_price_min=lc.sell_price_min,
-        micro_engine=None,
+        micro_engine=micro_engine,
         ml_overlay=lc.ml_overlay,          # no-ops without micro_engine/features
         ml_weight=lc.ml_weight,
         obi_veto=lc.obi_veto,
@@ -341,7 +395,19 @@ async def backtest(cfg: BacktestConfig) -> list[SimFill]:
     # Diagnostics: where do markets/minutes get dropped? Separates
     # "no gross edge existed" from "edge eaten by costs/overlays/gates".
     diag = Counter()
-    sig_gen = _build_signal_generator(cfg)
+    micro_engine = None
+    if cfg.ofi_replay:
+        lc = Settings.from_env()
+        micro_engine = MicrostructureEngine(
+            model=DirectionalModel.load(),
+            obi_veto=lc.obi_veto, obi_veto_threshold=lc.obi_veto_threshold,
+            momentum_enabled=lc.momentum_enabled,
+            impulse_fade_enabled=lc.impulse_fade_enabled,
+            momentum_min_move_usd=lc.momentum_min_move_usd,
+            momentum_near_expiry_secs=lc.momentum_window_secs,
+        )
+    sig_gen = _build_signal_generator(cfg, micro_engine)
+    fill_rng = random.Random(0)
     headers = {"User-Agent": "Mozilla/5.0"}
     async with aiohttp.ClientSession(headers=headers) as session:
         log.info("Fetching resolved markets from last %d day(s)...", cfg.days)
@@ -410,6 +476,13 @@ async def backtest(cfg: BacktestConfig) -> list[SimFill]:
             sigmas = _rolling_sigma(klines, cfg.sigma_window_secs)
             kline_by_ts = {ts: c for ts, c in klines}
             kline_keys = sorted(kline_by_ts)
+
+            replay = None
+            if cfg.ofi_replay:
+                trades = await _fetch_agg_trades(session, symbol, start_ts, expiry)
+                if trades:
+                    replay = MicroReplay(trades)
+                    diag["mkt_with_tape"] += 1
 
             # For Up/Down markets the strike is the Binance close at start_ts.
             if is_updown:
@@ -482,8 +555,16 @@ async def backtest(cfg: BacktestConfig) -> list[SimFill]:
                     fee_rate=cfg.fee_rate, fee_exponent=1.0,
                 )
 
-                sig = sig_gen.evaluate(pm, tick, yes_book, carry_annual=0.0)
+                feats = replay.features(poly_ts, spot, sigma, tte) if replay is not None else None
+                sig = sig_gen.evaluate(pm, tick, yes_book, features=feats,
+                                       carry_annual=cfg.carry_annual)
                 if sig is None:
+                    continue
+                # Honest maker-fill model: a resting post-only order is only
+                # sometimes hit. <1 probability skips the fill and tries the
+                # next minute (the order rests until taken or the window moves).
+                if sig.is_maker and fill_rng.random() > cfg.maker_fill_prob:
+                    diag["min_maker_unfilled"] += 1
                     continue
                 diag["min_fired"] += 1
                 mkt_fired = True
@@ -659,6 +740,12 @@ def cli() -> None:
                         help="record every qualifying minute, not one entry per market")
     parser.add_argument("--trade-updown", action="store_true",
                         help="include Up/Down markets (synthetic strike; off by default)")
+    parser.add_argument("--carry-annual", type=float, default=0.0,
+                        help="perp-funding carry fed to the pricer (annualised)")
+    parser.add_argument("--maker-fill-prob", type=float, default=1.0,
+                        help="P(resting maker order is filled); <1 is the honest setting")
+    parser.add_argument("--ofi-replay", action="store_true",
+                        help="replay Binance aggTrades to activate the OFI/ML/momentum overlay")
     parser.add_argument("--debug", action="store_true",
                         help="always print the drop-reason diagnostics")
     parser.add_argument("--log-level", default="INFO")
@@ -677,6 +764,9 @@ def cli() -> None:
         half_spread=args.half_spread,
         all_fills=args.all_fills,
         trade_updown=args.trade_updown,
+        carry_annual=args.carry_annual,
+        maker_fill_prob=args.maker_fill_prob,
+        ofi_replay=args.ofi_replay,
         debug=args.debug,
     )
     fills = asyncio.run(backtest(cfg))
