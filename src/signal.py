@@ -42,6 +42,7 @@ from .pricing import (
     skew_adjusted_sigma,
     wedge_estimate,
     physical_to_risk_neutral,
+    apply_calibration,
     FEE_RATE_CRYPTO,
 )
 from .poly_universe import PolyMarket
@@ -114,6 +115,9 @@ class SignalGenerator:
         maker_join_ticks: int = 1,
         ml_horizon_secs: float = 300.0,
         nudge_cap: float = 0.10,
+        # self-calibration (src.calibrate output); None → paper/module priors
+        wedge_coeffs: dict | None = None,
+        calib: tuple[float, float] | None = None,
     ):
         self.max_notional = max_notional_per_trade
         self.safety_eps = safety_eps
@@ -144,6 +148,8 @@ class SignalGenerator:
         self.maker_join_ticks = maker_join_ticks
         self.ml_horizon_secs = ml_horizon_secs
         self.nudge_cap = nudge_cap
+        self.wedge_coeffs = wedge_coeffs
+        self.calib = calib
         self._last_fire: dict[str, float] = {}  # token_id → monotonic ts
 
     def _sigma_used(self, market: PolyMarket, binance: BinanceTick) -> float:
@@ -171,7 +177,7 @@ class SignalGenerator:
             sigma_annual=sigma_used, drift_annual=getattr(binance, "drift_annual", 0.0),
             carry_annual=carry_annual,
         )
-        return p, sigma_used
+        return apply_calibration(p, self.calib), sigma_used
 
     def evaluate(
         self,
@@ -222,6 +228,8 @@ class SignalGenerator:
             drift_annual=getattr(binance, "drift_annual", 0.0),
             carry_annual=carry_annual,
         )
+        # Self-calibrated recalibration of the pricer (src.calibrate), if loaded.
+        p_fair = apply_calibration(p_fair, self.calib)
 
         obi = order_book_imbalance(yes_book.bid_size, yes_book.ask_size)
 
@@ -293,8 +301,19 @@ class SignalGenerator:
         if top_price <= 0 or top_price < price_floor or top_price > self.price_max:
             return None
 
-        # ---- Favourite-longshot wedge haircut (Portnaya Table 5) ----
-        wedge = wedge_estimate(p_fair, tte_hours) if self.longshot_tilt_mult else 0.0
+        # ---- Favourite-longshot wedge haircut (Portnaya Table 5; fitted coeffs
+        # from src.calibrate when available, else the paper prior) ----
+        if not self.longshot_tilt_mult:
+            wedge = 0.0
+        elif self.wedge_coeffs:
+            wedge = wedge_estimate(
+                p_fair, tte_hours,
+                self.wedge_coeffs["intercept"],
+                self.wedge_coeffs["beta_pfair"],
+                self.wedge_coeffs["beta_tte_hr"],
+            )
+        else:
+            wedge = wedge_estimate(p_fair, tte_hours)
         buy_pen = self.longshot_tilt_mult * max(0.0, wedge)
         sell_pen = self.longshot_tilt_mult * max(0.0, -wedge)
         quoted_spread = max(0.0, book.best_ask - book.best_bid)

@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 import aiohttp
 
@@ -167,3 +168,78 @@ def find_xvenue_arbs(
                     pm.symbol, pm.strike, int(pm.expiry_ts), desc, cost, edge,
                 )
     return out
+
+
+class KalshiExecutor:
+    """Signed order placement on Kalshi — the live leg of the cross-venue arb.
+
+    Kalshi authenticates each request with RSA-PSS over `timestamp+METHOD+path`.
+    The `cryptography` dependency is imported lazily so the module loads (and the
+    scanner runs) without it; only live order placement needs it. Network- and
+    credential-gated — supply KALSHI_KEY_ID and a PEM private key."""
+
+    def __init__(self, api_key_id: str, private_key_pem: str, base: str = DEFAULT_BASE):
+        self.key_id = api_key_id
+        self.pem = private_key_pem
+        self.base = base.rstrip("/")
+        self._sign_prefix = urlparse(self.base).path or "/trade-api/v2"
+        self._priv = None
+
+    @staticmethod
+    def order_body(ticker: str, action: str, side: str, count: int, price_cents: int,
+                   order_type: str = "limit") -> dict:
+        """Build the /portfolio/orders payload (pure — unit-testable)."""
+        body = {
+            "ticker": ticker, "action": action, "side": side,
+            "count": int(count), "type": order_type,
+        }
+        key = "yes_price" if side == "yes" else "no_price"
+        body[key] = int(price_cents)
+        return body
+
+    def _load_key(self):
+        if self._priv is None:
+            from cryptography.hazmat.primitives.serialization import load_pem_private_key
+            pem = self.pem.encode() if isinstance(self.pem, str) else self.pem
+            self._priv = load_pem_private_key(pem, password=None)
+        return self._priv
+
+    def _sign(self, ts: str, method: str, path: str) -> str:
+        import base64
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import padding
+        msg = f"{ts}{method}{path}".encode()
+        sig = self._load_key().sign(
+            msg,
+            padding.PSS(mgf=padding.MGF1(hashes.SHA256()),
+                        salt_length=padding.PSS.DIGEST_LENGTH),
+            hashes.SHA256(),
+        )
+        return base64.b64encode(sig).decode()
+
+    def headers(self, method: str, sub_path: str) -> dict:
+        """Auth headers for METHOD on `<prefix><sub_path>` (e.g. /portfolio/orders)."""
+        ts = str(int(time.time() * 1000))
+        path = self._sign_prefix + sub_path
+        return {
+            "KALSHI-ACCESS-KEY": self.key_id,
+            "KALSHI-ACCESS-TIMESTAMP": ts,
+            "KALSHI-ACCESS-SIGNATURE": self._sign(ts, method, path),
+            "Content-Type": "application/json",
+        }
+
+    async def place_order(
+        self, session: aiohttp.ClientSession, ticker: str, action: str,
+        side: str, count: int, price_cents: int,
+    ) -> dict | None:
+        body = self.order_body(ticker, action, side, count, price_cents)
+        try:
+            async with session.post(
+                f"{self.base}/portfolio/orders",
+                json=body, headers=self.headers("POST", "/portfolio/orders"),
+                timeout=aiohttp.ClientTimeout(total=8),
+            ) as r:
+                return await r.json()
+        except Exception as exc:
+            log.error("Kalshi order failed: %s", exc)
+            return None

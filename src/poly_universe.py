@@ -30,6 +30,8 @@ from datetime import datetime, timezone
 
 import aiohttp
 
+from .resolution import extract_published_ptb
+
 log = logging.getLogger(__name__)
 
 GAMMA_API = "https://gamma-api.polymarket.com/markets"
@@ -63,6 +65,7 @@ class PolyMarket:
     tick_size: float    # from API; default 0.01
     symbol: str = "btcusdt"  # Binance feed to use
     slug: str = ""      # market slug — encodes the Up/Down window (e.g. btc-updown-5m-<unix>)
+    price_to_beat: float = 0.0  # published Chainlink window-open ref, if exposed
     # Cached structural flags computed once at universe-load time so the
     # signal generator doesn't have to re-derive them every tick.
     is_updown: bool = False
@@ -264,6 +267,7 @@ async def fetch_active_markets(
                     tick_size=tick,
                     symbol=symbol,
                     slug=str(m.get("slug", "")),
+                    price_to_beat=extract_published_ptb(m),
                     is_updown=is_updown,
                     is_threshold=is_threshold,
                     fee_rate=fee_rate,

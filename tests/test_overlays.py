@@ -138,13 +138,13 @@ def test_engine_obi_veto():
 # ---------------- mean reversion ----------------
 
 def test_meanrev_fires_on_deviation():
-    mr = MeanReversionTracker(band=0.05, half_life_secs=1e9, max_hold_secs=0.0, warmup_updates=2)
-    # build a stable baseline D≈0 (p_poly 0.50, p_fair 0.50)
+    mr = MeanReversionTracker(band=0.05, half_life_secs=600.0, max_hold_secs=3600.0,
+                              warmup_updates=2, z_entry=1.5, tte_gate_mult=2.0)
+    tte = 100_000.0  # well above the gate (2×600)
     for _ in range(5):
-        assert mr.update("t", 0.50, 0.49, 0.51) is None
-    # now market jumps rich: mid 0.70 vs fair 0.50 → SELL
-    intent = mr.update("t", 0.50, 0.69, 0.71)
-    assert intent is not None and intent.side == "SELL"
+        assert mr.update("t", tte, 0.50, 0.49, 0.51) is None
+    action = mr.update("t", tte, 0.50, 0.69, 0.71)  # mid 0.70 vs fair 0.50 → rich
+    assert action is not None and action.kind == "ENTER" and action.side == "SELL"
 
 
 # ---------------- combinatorial arbs ----------------

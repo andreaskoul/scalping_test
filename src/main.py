@@ -48,8 +48,8 @@ from .meanrev import MeanReversionTracker
 from .microstructure import DirectionalModel, MicrostructureEngine, MicroFeatures
 from .poly_universe import fetch_active_markets
 from .poly_ws import PolyWS
-from .pricing import implied_prob, SIGMA_MIN
-from .resolution import PriceToBeatCache
+from .pricing import implied_prob, SIGMA_MIN, load_wedge_coeffs, load_calibration
+from .resolution import PriceToBeatCache, ChainlinkBasis
 from .risk import RiskManager
 from .signal import Side, Signal, SignalGenerator
 from .sizing import kelly_size
@@ -217,7 +217,8 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
         momentum_min_move_usd=cfg.momentum_min_move_usd,
         momentum_near_expiry_secs=cfg.momentum_window_secs,
     )
-    price_to_beat = PriceToBeatCache()
+    chainlink_basis = ChainlinkBasis()
+    price_to_beat = PriceToBeatCache(basis=chainlink_basis)
     meanrev = (
         MeanReversionTracker(
             band=cfg.meanrev_band,
@@ -227,6 +228,15 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
         if cfg.meanrev_enabled else None
     )
     kalshi_client = KalshiClient(cfg.kalshi_api_base) if cfg.xvenue_enabled else None
+
+    # Self-calibration: hot-load wedge + recalibration fitted by src.calibrate
+    # from our own resolved fills (falls back to the paper prior if absent).
+    fitted_wedge = load_wedge_coeffs("wedge_coeffs.json")
+    fitted_calib = load_calibration("calib_coeffs.json")
+    if fitted_wedge:
+        log.info("Loaded fitted wedge coeffs: %s", fitted_wedge)
+    if fitted_calib:
+        log.info("Loaded p* recalibration: a=%.4f b=%.4f", *fitted_calib)
 
     signal_gen = SignalGenerator(
         max_notional_per_trade=max_notional,
@@ -255,6 +265,8 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
         kelly_fraction=cfg.kelly_fraction,
         maker_enabled=cfg.maker_enabled,
         maker_join_ticks=cfg.maker_join_ticks,
+        wedge_coeffs=fitted_wedge,
+        calib=fitted_calib,
     )
     risk = RiskManager(
         max_notional_per_trade=max_notional,
@@ -263,7 +275,11 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
         binance_stale_secs=binance_stale,
         poly_stale_secs=poly_stale,
     )
-    executor = Executor(paper=paper)
+    executor = Executor(
+        paper=paper,
+        maker_fill_prob=cfg.maker_fill_prob,
+        maker_gtd_secs=cfg.maker_gtd_secs,
+    )
     await executor.setup(private_key=private_key)
 
     category_tracker = CategoryTracker.load()
@@ -374,6 +390,16 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
                     cum_no_spot += 1
                     continue
 
+                # Price against the settlement feed: shift Binance spot by the
+                # tracked Chainlink basis so p* reflects what the market resolves
+                # on. No-op until a published Price-to-Beat diverges from Binance.
+                if cfg.chainlink_basis_adj:
+                    _b = chainlink_basis.value(market.symbol)
+                    if _b:
+                        tick.mid += _b
+                        tick.bid += _b
+                        tick.ask += _b
+
                 # Up/Down strike anchoring. With Price-to-Beat on, the
                 # refresher anchors to the real Chainlink window-open ref; if
                 # it hasn't yet, skip rather than fall back to the biased
@@ -427,26 +453,33 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
                     market, tick, yes_book, features=feats, carry_annual=carry,
                 )
 
-                # Mean-reversion overlay (Portnaya 4h half-life) — fires when
-                # D_t = P_poly - P_fair stretches beyond its own EWMA. Fed each
-                # tick; only emits a fade when the model leg is quiet.
-                if signal is None and meanrev is not None:
-                    p_fair, _ = signal_gen.fair_prob(market, tick, carry)
-                    intent = meanrev.update(
-                        market.yes_token_id, p_fair, yes_book.best_bid, yes_book.best_ask,
+                # Mean-reversion overlay (Portnaya 4h half-life). Fed every tick
+                # so the EWMA stays fresh and open fades can be exited; gated to
+                # markets with tte >> half-life (never 5/15-min). ENTER only when
+                # the model leg is quiet; EXIT always flattens.
+                if meanrev is not None:
+                    tte_sec = market.expiry_ts - now_wall
+                    pf_mr, _ = signal_gen.fair_prob(market, tick, carry)
+                    mid_px = 0.5 * (yes_book.best_bid + yes_book.best_ask)
+                    size_hint = round(max_notional / mid_px, 2) if mid_px > 0 else 0.0
+                    action = meanrev.update(
+                        market.yes_token_id, tte_sec, pf_mr,
+                        yes_book.best_bid, yes_book.best_ask, size_hint=size_hint,
                     )
-                    if intent is not None and intent.price > 0:
-                        if cfg.kelly_enabled:
-                            msz = kelly_size(intent.p_fair, intent.price, intent.side,
+                    if action is not None and action.price > 0 and (
+                        signal is None or action.kind == "EXIT"
+                    ):
+                        if cfg.kelly_enabled and action.kind == "ENTER":
+                            msz = kelly_size(action.p_fair, action.price, action.side,
                                              max_notional, cfg.kelly_fraction)
                         else:
-                            msz = round(max_notional / intent.price, 2)
+                            msz = round(max_notional / action.price, 2)
                         if msz and msz >= 1.0:
                             signal = Signal(
                                 market=market, token_id=market.yes_token_id,
-                                side=Side(intent.side), price=intent.price, size=round(msz, 2),
-                                p_star=intent.p_fair, edge=abs(intent.deviation), sigma=0.0,
-                                source="meanrev",
+                                side=Side(action.side), price=action.price, size=round(msz, 2),
+                                p_star=action.p_fair, edge=0.0, sigma=0.0,
+                                source=("meanrev" if action.kind == "ENTER" else "meanrev-exit"),
                             )
 
                 if signal is None:
@@ -523,23 +556,19 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
                     ):
                         log.debug("Combo %s blocked by risk", combo.arb_id)
                         continue
-                    legs_ok = True
-                    for s in sigs:
-                        f = await executor.execute(s)
-                        if f is None:
-                            # Live mode would need to flatten the filled legs.
-                            log.warning("Combo %s leg failed; remaining legs orphaned.", combo.arb_id)
-                            risk.record_error()
-                            legs_ok = False
-                            break
+                    # Atomic: a failed leg flattens the filled ones (orphan-safe).
+                    combo_fills = await executor.execute_atomic(sigs)
+                    if combo_fills is None:
+                        risk.record_error()
+                        continue
+                    for f in combo_fills:
                         risk.record_fill(f.price * f.size)
-                    if legs_ok:
-                        cum_arb_fills += 1
-                        log.info(
-                            "ARB EXECUTED %s [%s] credit=%.4f notional=%.2f legs=%d",
-                            combo.arb_id, combo.kind, combo.net_credit,
-                            combo.notional, len(combo.legs),
-                        )
+                    cum_arb_fills += 1
+                    log.info(
+                        "ARB EXECUTED %s [%s] credit=%.4f notional=%.2f legs=%d",
+                        combo.arb_id, combo.kind, combo.net_credit,
+                        combo.notional, len(combo.legs),
+                    )
 
             # ---- Heartbeat (cumulative over window) ----
             if (now_mono - last_heartbeat) > HEARTBEAT_SECS:

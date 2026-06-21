@@ -75,11 +75,38 @@ OFI-dominant defaults are used.
 
 ---
 
+## Validate → calibrate → train (the improvement loop)
+
+The bot now learns its priors from your own data instead of hardcoded constants.
+
+```bash
+# 1. Validate the edge on real history (drives the live overlay stack):
+python -m src.backtest --days 7                 # per-market PnL ± 95% CI
+python -m src.backtest --days 7 --ofi-replay --maker-fill-prob 0.5
+LONGSHOT_TILT_MULT=0 python -m src.backtest --days 7   # A/B the wedge
+
+# 2. Attribute live paper fills + audit calibration (needs resolved markets):
+python -m src.pnl_attribution                   # side×price×TTE, maker, Brier
+
+# 3. Fit the priors from your resolved fills (run nightly):
+python -m src.calibrate                          # → wedge_coeffs.json, calib_coeffs.json
+
+# 4. Train the directional model from a Binance trade tape:
+python -m src.ml_train --symbol btcusdt --hours 6 --min-auc 0.55   # → model_weights.json
+```
+
+`main.py` hot-loads `wedge_coeffs.json`, `calib_coeffs.json`, and `model_weights.json`
+at startup; each falls back to the paper/cold-start prior when absent. New honest
+knobs: `MAKER_FILL_PROB` (paper-mode resting-order fill rate; 0.5–0.6 is realistic)
+and `--ofi-replay` (activates the OFI/ML overlay in the backtest from aggTrades).
+
 ## Caveats (read before live)
 
-- **Maker paper-fills are optimistic.** Paper mode assumes a resting post-only
-  order fills; real maker fills are probabilistic. Treat maker PnL as an upper
-  bound until validated live with small size.
+- **Maker fills are now modelled, not assumed.** Set `MAKER_FILL_PROB` (e.g. 0.5)
+  so paper/backtest only fill a resting order some of the time. It defaults to 1.0
+  for backward-compatibility — lower it before trusting maker PnL.
+- **Combo legs are flattened on orphan.** `execute_atomic` unwinds filled legs if
+  a later leg fails; still validate live atomicity with small size first.
 - **ML transfer is unproven on crypto seconds.** The 88% AUC is SPY/minutes.
   arXiv:2511.15960 shows ML fails on raw binary direction — hence `ML_WEIGHT`
   is small and always passes through the risk-neutral conversion.
