@@ -49,7 +49,7 @@ from .microstructure import DirectionalModel, MicrostructureEngine, MicroFeature
 from .poly_universe import fetch_active_markets
 from .poly_ws import PolyWS
 from .pricing import implied_prob, SIGMA_MIN
-from .resolution import PriceToBeatCache
+from .resolution import PriceToBeatCache, ChainlinkBasis
 from .risk import RiskManager
 from .signal import Side, Signal, SignalGenerator
 from .sizing import kelly_size
@@ -217,7 +217,8 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
         momentum_min_move_usd=cfg.momentum_min_move_usd,
         momentum_near_expiry_secs=cfg.momentum_window_secs,
     )
-    price_to_beat = PriceToBeatCache()
+    chainlink_basis = ChainlinkBasis()
+    price_to_beat = PriceToBeatCache(basis=chainlink_basis)
     meanrev = (
         MeanReversionTracker(
             band=cfg.meanrev_band,
@@ -374,6 +375,16 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
                     cum_no_spot += 1
                     continue
 
+                # Price against the settlement feed: shift Binance spot by the
+                # tracked Chainlink basis so p* reflects what the market resolves
+                # on. No-op until a published Price-to-Beat diverges from Binance.
+                if cfg.chainlink_basis_adj:
+                    _b = chainlink_basis.value(market.symbol)
+                    if _b:
+                        tick.mid += _b
+                        tick.bid += _b
+                        tick.ask += _b
+
                 # Up/Down strike anchoring. With Price-to-Beat on, the
                 # refresher anchors to the real Chainlink window-open ref; if
                 # it hasn't yet, skip rather than fall back to the biased
@@ -427,26 +438,33 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
                     market, tick, yes_book, features=feats, carry_annual=carry,
                 )
 
-                # Mean-reversion overlay (Portnaya 4h half-life) — fires when
-                # D_t = P_poly - P_fair stretches beyond its own EWMA. Fed each
-                # tick; only emits a fade when the model leg is quiet.
-                if signal is None and meanrev is not None:
-                    p_fair, _ = signal_gen.fair_prob(market, tick, carry)
-                    intent = meanrev.update(
-                        market.yes_token_id, p_fair, yes_book.best_bid, yes_book.best_ask,
+                # Mean-reversion overlay (Portnaya 4h half-life). Fed every tick
+                # so the EWMA stays fresh and open fades can be exited; gated to
+                # markets with tte >> half-life (never 5/15-min). ENTER only when
+                # the model leg is quiet; EXIT always flattens.
+                if meanrev is not None:
+                    tte_sec = market.expiry_ts - now_wall
+                    pf_mr, _ = signal_gen.fair_prob(market, tick, carry)
+                    mid_px = 0.5 * (yes_book.best_bid + yes_book.best_ask)
+                    size_hint = round(max_notional / mid_px, 2) if mid_px > 0 else 0.0
+                    action = meanrev.update(
+                        market.yes_token_id, tte_sec, pf_mr,
+                        yes_book.best_bid, yes_book.best_ask, size_hint=size_hint,
                     )
-                    if intent is not None and intent.price > 0:
-                        if cfg.kelly_enabled:
-                            msz = kelly_size(intent.p_fair, intent.price, intent.side,
+                    if action is not None and action.price > 0 and (
+                        signal is None or action.kind == "EXIT"
+                    ):
+                        if cfg.kelly_enabled and action.kind == "ENTER":
+                            msz = kelly_size(action.p_fair, action.price, action.side,
                                              max_notional, cfg.kelly_fraction)
                         else:
-                            msz = round(max_notional / intent.price, 2)
+                            msz = round(max_notional / action.price, 2)
                         if msz and msz >= 1.0:
                             signal = Signal(
                                 market=market, token_id=market.yes_token_id,
-                                side=Side(intent.side), price=intent.price, size=round(msz, 2),
-                                p_star=intent.p_fair, edge=abs(intent.deviation), sigma=0.0,
-                                source="meanrev",
+                                side=Side(action.side), price=action.price, size=round(msz, 2),
+                                p_star=action.p_fair, edge=0.0, sigma=0.0,
+                                source=("meanrev" if action.kind == "ENTER" else "meanrev-exit"),
                             )
 
                 if signal is None:

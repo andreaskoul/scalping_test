@@ -79,12 +79,75 @@ def window_start_ts(market) -> float:
     return exp - w
 
 
-class PriceToBeatCache:
-    """Fetches and caches the window-open reference price per market."""
+# Candidate fields under which Polymarket may publish the real Chainlink
+# "Price to Beat" / window-open reference on the Gamma market object. We read
+# the real value when present and fall back to the Binance-kline proxy.
+_PTB_FIELDS = (
+    "priceToBeat", "price_to_beat", "startPrice", "startingPrice",
+    "openPrice", "referencePrice", "strikePrice",
+)
 
-    def __init__(self):
+
+def extract_published_ptb(market_raw: dict) -> float:
+    """Best-effort read of the published Price-to-Beat from a raw market dict.
+
+    Returns 0.0 if no recognised field is present (caller then uses the proxy).
+    Forward-compatible: when Polymarket exposes the field we anchor to the exact
+    settlement reference instead of a Binance approximation."""
+    for k in _PTB_FIELDS:
+        v = market_raw.get(k)
+        if v in (None, "", 0):
+            continue
+        try:
+            f = float(v)
+            if f > 0:
+                return f
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
+class ChainlinkBasis:
+    """EWMA of (settlement reference − Binance mid) per symbol.
+
+    Bootstrapped for free whenever we anchor an Up/Down strike from a *published*
+    Price-to-Beat: the difference between that Chainlink value and the Binance
+    1-minute open at the same instant is a direct basis observation. The live
+    pricer then shifts spot by this basis so p* is computed against the feed the
+    market actually settles on, not raw Binance. Zero until a published PTB
+    diverges from Binance (i.e. a no-op until real data is present)."""
+
+    def __init__(self, half_life_secs: float = 3600.0):
+        self.half_life = max(1.0, half_life_secs)
+        self._b: dict[str, tuple[float, float]] = {}  # symbol → (ewma, last_ts)
+
+    def record(self, symbol: str, basis: float) -> None:
+        now = time.monotonic()
+        prev = self._b.get(symbol)
+        if prev is None:
+            self._b[symbol] = (basis, now)
+            return
+        ewma, last = prev
+        import math
+        lam = math.exp(-(now - last) * math.log(2.0) / self.half_life)
+        self._b[symbol] = (lam * ewma + (1.0 - lam) * basis, now)
+
+    def value(self, symbol: str) -> float:
+        p = self._b.get(symbol)
+        return p[0] if p else 0.0
+
+
+class PriceToBeatCache:
+    """Fetches and caches the window-open reference price per market.
+
+    Prefers the real published Price-to-Beat (PolyMarket.price_to_beat); falls
+    back to the Binance 1-minute open as a proxy. When both are available it
+    records the difference as a Chainlink-vs-Binance basis sample."""
+
+    def __init__(self, basis: "ChainlinkBasis | None" = None):
         # condition_id → (anchored_strike, fetched_at)
         self._cache: dict[str, tuple[float, float]] = {}
+        self._basis = basis
 
     async def anchored_strike(
         self, session: aiohttp.ClientSession, market
@@ -102,15 +165,26 @@ class PriceToBeatCache:
             return None
 
         sym = getattr(market, "symbol", "btcusdt")
-        ref = await self._fetch_open(session, sym, start)
-        if ref is not None and ref > 0:
-            self._cache[cid] = (ref, time.monotonic())
-            log.info(
-                "Price-to-Beat anchored: %s K=%.2f (window open %d)",
-                getattr(market, "question", "")[:48], ref, int(start),
-            )
-            return ref
-        return None
+        published = float(getattr(market, "price_to_beat", 0.0) or 0.0)
+        open_ref = await self._fetch_open(session, sym, start)
+
+        if published > 0:
+            strike = published
+            if open_ref and open_ref > 0 and self._basis is not None:
+                self._basis.record(sym, published - open_ref)   # settlement − binance
+            source = "published"
+        elif open_ref and open_ref > 0:
+            strike = open_ref
+            source = "binance-proxy"
+        else:
+            return None
+
+        self._cache[cid] = (strike, time.monotonic())
+        log.info(
+            "Price-to-Beat anchored (%s): %s K=%.2f (window open %d)",
+            source, getattr(market, "question", "")[:42], strike, int(start),
+        )
+        return strike
 
     async def _fetch_open(
         self, session: aiohttp.ClientSession, symbol: str, start_ts: float
