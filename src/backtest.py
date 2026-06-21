@@ -50,6 +50,8 @@ from .pricing import (
     implied_prob,
     taker_fee_per_share,
     maker_rebate_per_share,
+    load_wedge_coeffs,
+    load_calibration,
     FEE_RATE_CRYPTO,
 )
 from .config import Settings
@@ -387,6 +389,8 @@ def _build_signal_generator(cfg: BacktestConfig, micro_engine=None) -> SignalGen
         kelly_fraction=lc.kelly_fraction,
         maker_enabled=lc.maker_enabled,
         maker_join_ticks=lc.maker_join_ticks,
+        wedge_coeffs=load_wedge_coeffs("wedge_coeffs.json"),
+        calib=load_calibration("calib_coeffs.json"),
     )
 
 

@@ -184,6 +184,47 @@ WEDGE_BETA_TTE_HR: float = 0.0008
 WEDGE_CLAMP: float = 0.20      # cap |wedge| so a single term can't dominate
 
 
+def load_wedge_coeffs(path: str = "wedge_coeffs.json") -> dict | None:
+    """Load self-calibrated wedge coefficients (src.calibrate output), or None.
+
+    The bot hot-loads these at startup so the favourite-longshot tilt is fit to
+    your *own* resolved fills rather than the 2023-paper prior."""
+    import json, os
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            d = json.load(f)
+        return {
+            "intercept": float(d["intercept"]),
+            "beta_pfair": float(d["beta_pfair"]),
+            "beta_tte_hr": float(d["beta_tte_hr"]),
+        }
+    except Exception:
+        return None
+
+
+def load_calibration(path: str = "calib_coeffs.json") -> tuple[float, float] | None:
+    """Load a linear recalibration (a, b) for p* → P(outcome), or None."""
+    import json, os
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            d = json.load(f)
+        return float(d["a"]), float(d["b"])
+    except Exception:
+        return None
+
+
+def apply_calibration(p: float, ab: tuple[float, float] | None) -> float:
+    """Recalibrate a probability with a fitted linear map, clamped to (0,1)."""
+    if ab is None:
+        return p
+    a, b = ab
+    return max(0.001, min(0.999, a + b * p))
+
+
 def wedge_estimate(
     p_fair: float,
     tte_hours: float,

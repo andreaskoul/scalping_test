@@ -48,7 +48,7 @@ from .meanrev import MeanReversionTracker
 from .microstructure import DirectionalModel, MicrostructureEngine, MicroFeatures
 from .poly_universe import fetch_active_markets
 from .poly_ws import PolyWS
-from .pricing import implied_prob, SIGMA_MIN
+from .pricing import implied_prob, SIGMA_MIN, load_wedge_coeffs, load_calibration
 from .resolution import PriceToBeatCache, ChainlinkBasis
 from .risk import RiskManager
 from .signal import Side, Signal, SignalGenerator
@@ -229,6 +229,15 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
     )
     kalshi_client = KalshiClient(cfg.kalshi_api_base) if cfg.xvenue_enabled else None
 
+    # Self-calibration: hot-load wedge + recalibration fitted by src.calibrate
+    # from our own resolved fills (falls back to the paper prior if absent).
+    fitted_wedge = load_wedge_coeffs("wedge_coeffs.json")
+    fitted_calib = load_calibration("calib_coeffs.json")
+    if fitted_wedge:
+        log.info("Loaded fitted wedge coeffs: %s", fitted_wedge)
+    if fitted_calib:
+        log.info("Loaded p* recalibration: a=%.4f b=%.4f", *fitted_calib)
+
     signal_gen = SignalGenerator(
         max_notional_per_trade=max_notional,
         safety_eps=safety_eps,
@@ -256,6 +265,8 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
         kelly_fraction=cfg.kelly_fraction,
         maker_enabled=cfg.maker_enabled,
         maker_join_ticks=cfg.maker_join_ticks,
+        wedge_coeffs=fitted_wedge,
+        calib=fitted_calib,
     )
     risk = RiskManager(
         max_notional_per_trade=max_notional,
