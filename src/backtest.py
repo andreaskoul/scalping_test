@@ -105,6 +105,7 @@ class SimFill:
     resolution: float       # 1.0 or 0.0
     pnl: float
     is_maker: bool = False
+    expiry_ts: float = 0.0  # market resolution time — for correlation grouping
 
 
 def _parse_strike(question: str) -> float:
@@ -128,39 +129,76 @@ def _parse_iso(s: str | None) -> float:
         return 0.0
 
 
-async def _fetch_resolved_markets(session: aiohttp.ClientSession, days: int) -> list[dict]:
-    """Pull resolved BTC/ETH markets (threshold + Up/Down) from last `days`."""
+# The BTC/ETH hourly threshold markets live in dedicated Gamma "series".
+# Fetching by series (server-side filtered) is the only way to reach real
+# history: the unfiltered /markets feed returns thousands of all-category
+# closed markets per day, so paging it never reaches yesterday. Each event in
+# a series is one resolution window (e.g. "Bitcoin above ___ on June 21, 3PM
+# ET?") and carries ~20 strike markets with full clobTokenIds/outcomePrices.
+EVENTS_API = "https://gamma-api.polymarket.com/events"
+_SERIES_SLUGS = [
+    "bitcoin-multi-strikes-hourly",
+    "ethereum-multi-strikes-hourly",
+]
+_GAMMA_PAGE = 100
+_MAX_PAGES = 40          # per series; hourly events ≈ a few days/page
+
+
+async def _fetch_resolved_markets(
+    session: aiohttp.ClientSession, days: int
+) -> tuple[list[dict], bool]:
+    """Pull resolved BTC/ETH threshold markets from the last `days` via the
+    hourly multi-strike series.
+
+    Returns (markets, truncated); `truncated` is True if the page budget ran
+    out before reaching the `days` cutoff for some series — i.e. the realised
+    window is shorter than requested.
+    """
     headers = {"User-Agent": "Mozilla/5.0"}
-    now = time.time()
-    cutoff = now - days * 86400
-    now_iso = datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    cutoff = time.time() - days * 86400
     out: list[dict] = []
-    offset = 0
-    # closed=true alone returns long-dated future markets that closed early;
-    # constraining end_date_max=now restricts to truly past-resolved markets.
-    while offset < 5000:
-        url = (
-            f"{GAMMA_API}?closed=true&limit=500&offset={offset}"
-            f"&end_date_max={now_iso}&order=endDate&ascending=false"
-        )
-        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as r:
-            if r.status != 200:
+    truncated = False
+    for slug in _SERIES_SLUGS:
+        reached_cutoff = False
+        for page in range(_MAX_PAGES):
+            url = (
+                f"{EVENTS_API}?series_slug={slug}&closed=true&limit={_GAMMA_PAGE}"
+                f"&offset={page * _GAMMA_PAGE}&order=endDate&ascending=false"
+            )
+            try:
+                async with session.get(
+                    url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)
+                ) as r:
+                    if r.status != 200:
+                        break
+                    batch = await r.json(content_type=None)
+            except Exception as exc:
+                log.debug("Event fetch failed for %s p%d: %s", slug, page, exc)
                 break
-            batch = await r.json(content_type=None)
-        if not batch:
-            break
-        for m in batch:
-            q = m.get("question", "")
-            if not (THRESHOLD_RE.search(q) or UPDOWN_RE.search(q)):
-                continue
-            end_ts = _parse_iso(m.get("endDate"))
-            if end_ts < cutoff:
-                return out
-            out.append(m)
-        if len(batch) < 500:
-            break
-        offset += len(batch)
-    return out
+            if not batch:
+                reached_cutoff = True
+                break
+            stop = False
+            for ev in batch:
+                if _parse_iso(ev.get("endDate")) < cutoff:
+                    stop = True
+                    break
+                ev_end, ev_start = ev.get("endDate"), ev.get("startDate")
+                for mk in ev.get("markets", []):
+                    q = mk.get("question", "")
+                    if not (THRESHOLD_RE.search(q) or UPDOWN_RE.search(q)):
+                        continue
+                    # Markets in a series event occasionally omit their own
+                    # dates — inherit the event window so pricing still works.
+                    mk.setdefault("endDate", ev_end)
+                    mk.setdefault("startDate", ev_start)
+                    out.append(mk)
+            if stop or len(batch) < _GAMMA_PAGE:
+                reached_cutoff = True
+                break
+        if not reached_cutoff:
+            truncated = True
+    return out, truncated
 
 
 async def _fetch_token_history(
@@ -307,8 +345,15 @@ async def backtest(cfg: BacktestConfig) -> list[SimFill]:
     headers = {"User-Agent": "Mozilla/5.0"}
     async with aiohttp.ClientSession(headers=headers) as session:
         log.info("Fetching resolved markets from last %d day(s)...", cfg.days)
-        markets = await _fetch_resolved_markets(session, cfg.days)
+        markets, truncated = await _fetch_resolved_markets(session, cfg.days)
         log.info("Found %d resolved BTC/ETH threshold markets", len(markets))
+        if truncated:
+            log.warning(
+                "Coverage TRUNCATED: hit the %d-page budget before reaching the "
+                "%d-day cutoff. Gamma returns all categories newest-first, so the "
+                "realised window is shorter than requested — results reflect only "
+                "the most recent markets.", _MAX_PAGES, cfg.days,
+            )
         markets = markets[: cfg.max_markets]
         diag["markets_seen"] = len(markets)
 
@@ -468,6 +513,7 @@ async def backtest(cfg: BacktestConfig) -> list[SimFill]:
                     resolution=resolution,
                     pnl=pnl,
                     is_maker=sig.is_maker,
+                    expiry_ts=expiry,
                 ))
 
                 # One independent sample per market unless --all-fills.
@@ -563,12 +609,27 @@ def _summarize(fills: list[SimFill]) -> None:
     mean_mkt = sum(mkt_pnls) / m
     var = sum((p - mean_mkt) ** 2 for p in mkt_pnls) / m if m > 1 else 0.0
     stderr = math.sqrt(var / m) if m > 0 else 0.0
-    print(f"\n--- Per-market (independent samples, N={m}) ---")
+    print(f"\n--- Per-market (N={m}) ---")
     print(f"Markets profitable: {mkt_wins}/{m} ({mkt_wins/m*100:.1f}%)")
     print(f"PnL per market:     ${mean_mkt:+.3f} ± ${stderr:.3f} (1 s.e.)")
     print(f"95% CI on mean:     [${mean_mkt - 1.96*stderr:+.3f}, ${mean_mkt + 1.96*stderr:+.3f}]")
     if mean_mkt - 1.96 * stderr <= 0 <= mean_mkt + 1.96 * stderr:
         print("  ⚠ CI straddles 0 — edge is NOT statistically distinguishable from noise.")
+
+    # --- Correlation guard: markets resolving on the same 1h candle and the
+    # same underlying are ONE bet, not many. The CI above assumes independence;
+    # if the markets cluster into a few resolution windows it is overconfident. ---
+    windows = set()
+    for fs in by_market.values():
+        f0 = fs[0]
+        sym = "ETH" if "eth" in f0.symbol or "ethereum" in f0.market_question.lower() else "BTC"
+        windows.add((sym, round(f0.expiry_ts / 3600.0)))   # underlying × resolution hour
+    k = len(windows)
+    print(f"Independent resolution windows (underlying × hour): {k}")
+    if k < m:
+        print(f"  ⚠ {m} markets collapse to ~{k} independent event(s) — the per-market")
+        print(f"    CI is OVERCONFIDENT. Treat this as ≈{k} bet(s), not {m}. A 100% win")
+        print(f"    rate over correlated same-hour strikes is one move, not an edge.")
 
     print("\nCaveats (real PnL is worse than this):")
     print("  - top-of-book fill assumed; no queue/latency model")
