@@ -1,0 +1,282 @@
+20:53:41 INFO     __main__  === Polymarket-vs-Binance arb bot starting [PAPER] ===
+20:53:41 INFO     __main__  Binance symbols: ['btcusdt', 'ethusdt'] | safety_eps=0.0050 cooldown=10.0s notional<=25 | price=[0.25,0.75] σ_floor=0.50 tte=[300,2700]s skip_updown=False
+20:53:41 INFO     __main__  Will stop after 86400 seconds and print PnL summary.
+20:53:41 INFO     __main__  Overlays: longshot_tilt=1.00 maker=on ml=on(0.25) obi_veto=on(-0.60) momentum=on meanrev=on kelly=on(0.30) price_to_beat=on xvenue=off sell_tail>=0.03
+20:53:41 INFO     __main__  Loaded category tracker: 3 known, 0 currently blacklisted
+20:53:41 INFO     src.deribit_iv  Deribit IV poller started (refresh=60s, symbols=['btcusdt', 'ethusdt'])
+20:53:41 INFO     src.funding  Funding poller started (refresh=60s, symbols=['btcusdt', 'ethusdt'])
+20:53:41 INFO     src.poly_ws  Polymarket WS connected: wss://ws-subscriptions-clob.polymarket.com/ws/market
+20:53:41 INFO     src.poly_universe  Universe: 23 tradeable BTC/ETH markets (1 page(s), 23 BTC/ETH seen)
+20:53:41 INFO     __main__  Universe refreshed: 23 markets
+20:53:42 INFO     src.binance_ws  Binance WS connected: wss://stream.binance.com:443/stream?streams=btcusdt@bookTicker/btcusdt@aggTrade
+20:53:42 INFO     src.binance_ws  Binance WS connected: wss://stream.binance.com:443/stream?streams=ethusdt@bookTicker/ethusdt@aggTrade
+20:54:11 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=34 no-book=5185 warmup=700 markets=23 btcusdt[σ=0.050 iv=0.344 μ=-0.164] ethusdt[σ=0.050 iv=0.540 μ=-0.174] top-raw-gap=-1.000 ()
+20:54:11 INFO     src.poly_universe  Universe: 23 tradeable BTC/ETH markets (1 page(s), 23 BTC/ETH seen)
+20:54:11 INFO     __main__  Universe refreshed: 23 markets
+20:54:41 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=13222 warmup=0 markets=23 btcusdt[σ=0.083 iv=0.344 μ=+0.157] ethusdt[σ=0.069 iv=0.540 μ=+0.118] top-raw-gap=-1.000 ()
+20:54:41 INFO     src.poly_universe  Universe: 23 tradeable BTC/ETH markets (1 page(s), 23 BTC/ETH seen)
+20:54:41 INFO     __main__  Universe refreshed: 23 markets
+20:55:11 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=8415 warmup=0 markets=23 btcusdt[σ=0.081 iv=0.344 μ=+0.172] ethusdt[σ=0.078 iv=0.540 μ=-0.001] top-raw-gap=-1.000 ()
+20:55:12 INFO     src.poly_universe  Universe: 23 tradeable BTC/ETH markets (1 page(s), 23 BTC/ETH seen)
+20:55:12 INFO     __main__  Universe refreshed: 23 markets
+20:55:41 INFO     __main__  HEARTBEAT eval=17 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=10 no-book=7372 warmup=0 markets=23 btcusdt[σ=0.050 iv=0.344 μ=-0.165] ethusdt[σ=0.057 iv=0.540 μ=-0.099] top-raw-gap=-1.000 ()
+20:55:42 INFO     src.poly_universe  Universe: 24 tradeable BTC/ETH markets (1 page(s), 24 BTC/ETH seen)
+20:55:42 INFO     __main__  Universe refreshed: 24 markets
+20:56:11 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=6436 warmup=0 markets=24 btcusdt[σ=0.050 iv=0.344 μ=-0.081] ethusdt[σ=0.055 iv=0.540 μ=-0.009] top-raw-gap=-1.000 ()
+20:56:12 INFO     src.poly_universe  Universe: 24 tradeable BTC/ETH markets (1 page(s), 24 BTC/ETH seen)
+20:56:12 INFO     __main__  Universe refreshed: 24 markets
+20:56:41 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=7462 warmup=39 markets=24 btcusdt[σ=0.050 iv=0.344 μ=+0.003] ethusdt[σ=0.050 iv=0.540 μ=-0.039] top-raw-gap=-1.000 ()
+20:56:42 INFO     src.poly_universe  Universe: 24 tradeable BTC/ETH markets (1 page(s), 24 BTC/ETH seen)
+20:56:42 INFO     __main__  Universe refreshed: 24 markets
+20:57:11 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=6563 warmup=117 markets=24 btcusdt[σ=0.050 iv=0.344 μ=-0.149] ethusdt[σ=0.050 iv=0.540 μ=+0.016] top-raw-gap=-1.000 ()
+20:57:12 INFO     src.poly_universe  Universe: 24 tradeable BTC/ETH markets (1 page(s), 24 BTC/ETH seen)
+20:57:12 INFO     __main__  Universe refreshed: 24 markets
+20:57:42 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=6352 warmup=0 markets=24 btcusdt[σ=0.050 iv=0.344 μ=+0.016] ethusdt[σ=0.050 iv=0.540 μ=+0.159] top-raw-gap=-1.000 ()
+20:57:42 INFO     src.poly_universe  Universe: 22 tradeable BTC/ETH markets (1 page(s), 22 BTC/ETH seen)
+20:57:42 INFO     __main__  Universe refreshed: 22 markets
+20:58:12 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=6024 warmup=0 markets=22 btcusdt[σ=0.050 iv=0.344 μ=-0.044] ethusdt[σ=0.060 iv=0.540 μ=+0.084] top-raw-gap=-1.000 ()
+20:58:13 INFO     src.poly_universe  Universe: 22 tradeable BTC/ETH markets (1 page(s), 22 BTC/ETH seen)
+20:58:13 INFO     __main__  Universe refreshed: 22 markets
+20:58:42 INFO     __main__  HEARTBEAT eval=24 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=3225 warmup=0 markets=22 btcusdt[σ=0.050 iv=0.344 μ=-0.177] ethusdt[σ=0.050 iv=0.540 μ=+0.177] top-raw-gap=-1.000 ()
+20:58:43 INFO     src.poly_universe  Universe: 28 tradeable BTC/ETH markets (1 page(s), 28 BTC/ETH seen)
+20:58:43 INFO     __main__  Universe refreshed: 28 markets
+20:59:12 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=7348 warmup=0 markets=28 btcusdt[σ=0.050 iv=0.344 μ=-0.057] ethusdt[σ=0.057 iv=0.540 μ=-0.190] top-raw-gap=-1.000 ()
+20:59:13 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 28 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+20:59:13 INFO     __main__  Universe refreshed: 0 markets
+20:59:43 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 28 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+20:59:43 INFO     __main__  Universe refreshed: 0 markets
+21:00:14 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 28 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:00:14 INFO     __main__  Universe refreshed: 0 markets
+21:00:44 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 28 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:00:44 INFO     __main__  Universe refreshed: 0 markets
+21:01:14 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 28 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:01:14 INFO     __main__  Universe refreshed: 0 markets
+21:01:44 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 28 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:01:44 INFO     __main__  Universe refreshed: 0 markets
+21:02:14 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 27 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:02:14 INFO     __main__  Universe refreshed: 0 markets
+21:02:44 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 29 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:02:44 INFO     __main__  Universe refreshed: 0 markets
+21:03:15 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 26 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:03:15 INFO     __main__  Universe refreshed: 0 markets
+21:03:45 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 23 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:03:45 INFO     __main__  Universe refreshed: 0 markets
+21:04:15 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 22 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:04:15 INFO     __main__  Universe refreshed: 0 markets
+21:04:45 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 26 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:04:45 INFO     __main__  Universe refreshed: 0 markets
+21:05:15 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 26 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:05:15 INFO     __main__  Universe refreshed: 0 markets
+21:05:46 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 29 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:05:46 INFO     __main__  Universe refreshed: 0 markets
+21:06:16 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 29 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:06:16 INFO     __main__  Universe refreshed: 0 markets
+21:06:46 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 29 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:06:46 INFO     __main__  Universe refreshed: 0 markets
+21:07:16 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 27 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:07:16 INFO     __main__  Universe refreshed: 0 markets
+21:07:46 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 29 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:07:46 INFO     __main__  Universe refreshed: 0 markets
+21:08:16 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 28 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:08:16 INFO     __main__  Universe refreshed: 0 markets
+21:08:47 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 27 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:08:47 INFO     __main__  Universe refreshed: 0 markets
+21:08:51 WARNING  src.poly_ws  Polymarket WS closed (no close frame received or sent), reconnecting in 1.0s
+21:08:53 INFO     src.poly_ws  Polymarket WS connected: wss://ws-subscriptions-clob.polymarket.com/ws/market
+21:09:17 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 22 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:09:17 INFO     __main__  Universe refreshed: 0 markets
+21:09:47 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 25 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:09:47 INFO     __main__  Universe refreshed: 0 markets
+21:10:17 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 28 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:10:17 INFO     __main__  Universe refreshed: 0 markets
+21:10:47 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 25 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:10:47 INFO     __main__  Universe refreshed: 0 markets
+21:11:17 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 26 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:11:17 INFO     __main__  Universe refreshed: 0 markets
+21:11:48 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 26 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:11:48 INFO     __main__  Universe refreshed: 0 markets
+21:12:18 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 26 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:12:18 INFO     __main__  Universe refreshed: 0 markets
+21:12:48 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 21 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:12:48 INFO     __main__  Universe refreshed: 0 markets
+21:13:18 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 8 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:13:18 INFO     __main__  Universe refreshed: 0 markets
+21:13:48 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 8 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:13:48 INFO     __main__  Universe refreshed: 0 markets
+21:14:18 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 8 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:14:18 INFO     __main__  Universe refreshed: 0 markets
+21:14:48 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 8 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:14:48 INFO     __main__  Universe refreshed: 0 markets
+21:15:19 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 8 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:15:19 INFO     __main__  Universe refreshed: 0 markets
+21:15:49 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:15:49 INFO     __main__  Universe refreshed: 0 markets
+21:16:19 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:16:19 INFO     __main__  Universe refreshed: 0 markets
+21:16:49 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:16:49 INFO     __main__  Universe refreshed: 0 markets
+21:17:19 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:17:19 INFO     __main__  Universe refreshed: 0 markets
+21:17:49 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:17:49 INFO     __main__  Universe refreshed: 0 markets
+21:18:20 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:18:20 INFO     __main__  Universe refreshed: 0 markets
+21:18:50 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:18:50 INFO     __main__  Universe refreshed: 0 markets
+21:19:20 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:19:20 INFO     __main__  Universe refreshed: 0 markets
+21:19:50 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:19:50 INFO     __main__  Universe refreshed: 0 markets
+21:20:20 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:20:20 INFO     __main__  Universe refreshed: 0 markets
+21:20:50 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:20:50 INFO     __main__  Universe refreshed: 0 markets
+21:21:21 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:21:21 INFO     __main__  Universe refreshed: 0 markets
+21:21:51 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:21:51 INFO     __main__  Universe refreshed: 0 markets
+21:22:21 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:22:21 INFO     __main__  Universe refreshed: 0 markets
+21:22:51 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:22:51 INFO     __main__  Universe refreshed: 0 markets
+21:23:21 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:23:21 INFO     __main__  Universe refreshed: 0 markets
+21:23:52 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:23:52 INFO     __main__  Universe refreshed: 0 markets
+21:24:22 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:24:22 INFO     __main__  Universe refreshed: 0 markets
+21:24:52 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:24:52 INFO     __main__  Universe refreshed: 0 markets
+21:25:22 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:25:22 INFO     __main__  Universe refreshed: 0 markets
+21:25:52 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:25:52 INFO     __main__  Universe refreshed: 0 markets
+21:26:23 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:26:23 INFO     __main__  Universe refreshed: 0 markets
+21:26:53 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:26:53 INFO     __main__  Universe refreshed: 0 markets
+21:27:23 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:27:23 INFO     __main__  Universe refreshed: 0 markets
+21:27:53 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:27:53 INFO     __main__  Universe refreshed: 0 markets
+21:28:23 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:28:23 INFO     __main__  Universe refreshed: 0 markets
+21:28:54 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:28:54 INFO     __main__  Universe refreshed: 0 markets
+21:29:24 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:29:24 INFO     __main__  Universe refreshed: 0 markets
+21:29:54 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:29:54 INFO     __main__  Universe refreshed: 0 markets
+21:30:24 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:30:24 INFO     __main__  Universe refreshed: 0 markets
+21:30:54 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:30:54 INFO     __main__  Universe refreshed: 0 markets
+21:31:25 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:31:25 INFO     __main__  Universe refreshed: 0 markets
+21:31:55 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:31:55 INFO     __main__  Universe refreshed: 0 markets
+21:32:25 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:32:25 INFO     __main__  Universe refreshed: 0 markets
+21:32:55 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:32:55 INFO     __main__  Universe refreshed: 0 markets
+21:33:25 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:33:25 INFO     __main__  Universe refreshed: 0 markets
+21:33:55 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:33:56 INFO     __main__  Universe refreshed: 0 markets
+21:34:26 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:34:26 INFO     __main__  Universe refreshed: 0 markets
+21:34:56 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:34:56 INFO     __main__  Universe refreshed: 0 markets
+21:35:26 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:35:26 INFO     __main__  Universe refreshed: 0 markets
+21:35:56 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:35:56 INFO     __main__  Universe refreshed: 0 markets
+21:36:27 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:36:27 INFO     __main__  Universe refreshed: 0 markets
+21:36:57 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:36:57 INFO     __main__  Universe refreshed: 0 markets
+21:37:27 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:37:27 INFO     __main__  Universe refreshed: 0 markets
+21:37:57 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:37:57 INFO     __main__  Universe refreshed: 0 markets
+21:38:27 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:38:27 INFO     __main__  Universe refreshed: 0 markets
+21:38:57 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:38:57 INFO     __main__  Universe refreshed: 0 markets
+21:39:28 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:39:28 INFO     __main__  Universe refreshed: 0 markets
+21:39:58 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:39:58 INFO     __main__  Universe refreshed: 0 markets
+21:40:28 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:40:28 INFO     __main__  Universe refreshed: 0 markets
+21:40:58 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:40:58 INFO     __main__  Universe refreshed: 0 markets
+21:41:28 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:41:28 INFO     __main__  Universe refreshed: 0 markets
+21:41:58 INFO     src.poly_universe  Universe: 0 tradeable markets (1 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+21:41:58 INFO     __main__  Universe refreshed: 0 markets
+21:42:28 INFO     src.poly_universe  Universe: 2 tradeable BTC/ETH markets (1 page(s), 2 BTC/ETH seen)
+21:42:29 INFO     __main__  Universe refreshed: 2 markets
+21:42:29 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=186 warmup=0 markets=2 btcusdt[σ=0.050 iv=0.342 μ=+0.184] ethusdt[σ=0.050 iv=0.534 μ=-0.182] top-raw-gap=-1.000 ()
+21:42:29 WARNING  src.poly_ws  Polymarket WS closed (no close frame received or sent), reconnecting in 1.0s
+21:42:30 INFO     src.poly_ws  Polymarket WS connected: wss://ws-subscriptions-clob.polymarket.com/ws/market
+21:42:59 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=300 warmup=84 markets=2 btcusdt[σ=0.050 iv=0.341 μ=+0.112] ethusdt[σ=0.050 iv=0.534 μ=+0.183] top-raw-gap=-1.000 ()
+21:42:59 INFO     src.poly_universe  Universe: 3 tradeable BTC/ETH markets (1 page(s), 3 BTC/ETH seen)
+21:42:59 INFO     __main__  Universe refreshed: 3 markets
+21:43:29 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=6 no-book=729 warmup=0 markets=3 btcusdt[σ=0.057 iv=0.341 μ=-0.090] ethusdt[σ=0.050 iv=0.534 μ=-0.155] top-raw-gap=-1.000 ()
+21:43:29 INFO     src.poly_universe  Universe: 4 tradeable BTC/ETH markets (1 page(s), 4 BTC/ETH seen)
+21:43:29 INFO     __main__  Universe refreshed: 4 markets
+21:43:59 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=863 warmup=0 markets=4 btcusdt[σ=0.050 iv=0.341 μ=+0.076] ethusdt[σ=0.050 iv=0.534 μ=-0.178] top-raw-gap=-1.000 ()
+21:43:59 INFO     src.poly_universe  Universe: 5 tradeable BTC/ETH markets (1 page(s), 5 BTC/ETH seen)
+21:43:59 INFO     __main__  Universe refreshed: 5 markets
+21:44:29 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=1193 warmup=0 markets=5 btcusdt[σ=0.050 iv=0.341 μ=+0.119] ethusdt[σ=0.056 iv=0.534 μ=+0.069] top-raw-gap=-1.000 ()
+21:44:29 INFO     src.poly_universe  Universe: 8 tradeable BTC/ETH markets (1 page(s), 8 BTC/ETH seen)
+21:44:29 INFO     __main__  Universe refreshed: 8 markets
+21:44:59 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=2507 warmup=0 markets=8 btcusdt[σ=0.050 iv=0.341 μ=-0.178] ethusdt[σ=0.050 iv=0.534 μ=-0.196] top-raw-gap=-1.000 ()
+21:44:59 INFO     src.poly_universe  Universe: 11 tradeable BTC/ETH markets (1 page(s), 11 BTC/ETH seen)
+21:44:59 INFO     __main__  Universe refreshed: 11 markets
+21:45:29 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=6 no-book=2778 warmup=0 markets=11 btcusdt[σ=0.050 iv=0.341 μ=-0.155] ethusdt[σ=0.056 iv=0.534 μ=+0.064] top-raw-gap=-1.000 ()
+21:45:30 INFO     src.poly_universe  Universe: 11 tradeable BTC/ETH markets (1 page(s), 11 BTC/ETH seen)
+21:45:30 INFO     __main__  Universe refreshed: 11 markets
+21:45:59 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=8 no-book=2358 warmup=0 markets=11 btcusdt[σ=0.050 iv=0.341 μ=-0.151] ethusdt[σ=0.068 iv=0.534 μ=-0.127] top-raw-gap=-1.000 ()
+21:46:00 INFO     src.poly_universe  Universe: 13 tradeable BTC/ETH markets (1 page(s), 13 BTC/ETH seen)
+21:46:00 INFO     __main__  Universe refreshed: 13 markets
+21:46:29 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=4211 warmup=0 markets=13 btcusdt[σ=0.050 iv=0.341 μ=+0.131] ethusdt[σ=0.080 iv=0.534 μ=+0.062] top-raw-gap=-1.000 ()
+21:46:30 INFO     src.poly_universe  Universe: 15 tradeable BTC/ETH markets (1 page(s), 15 BTC/ETH seen)
+21:46:30 INFO     __main__  Universe refreshed: 15 markets
+21:46:59 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=3266 warmup=0 markets=15 btcusdt[σ=0.050 iv=0.341 μ=-0.194] ethusdt[σ=0.050 iv=0.535 μ=+0.131] top-raw-gap=-1.000 ()
+21:47:00 INFO     src.poly_universe  Universe: 16 tradeable BTC/ETH markets (1 page(s), 16 BTC/ETH seen)
+21:47:00 INFO     __main__  Universe refreshed: 16 markets
+21:47:29 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=3215 warmup=0 markets=16 btcusdt[σ=0.050 iv=0.341 μ=-0.191] ethusdt[σ=0.050 iv=0.535 μ=+0.195] top-raw-gap=-1.000 ()
+21:47:30 INFO     src.poly_universe  Universe: 20 tradeable BTC/ETH markets (1 page(s), 20 BTC/ETH seen)
+21:47:30 INFO     __main__  Universe refreshed: 20 markets
+21:48:00 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=8 no-book=4236 warmup=0 markets=20 btcusdt[σ=0.050 iv=0.341 μ=-0.196] ethusdt[σ=0.050 iv=0.535 μ=-0.195] top-raw-gap=-1.000 ()
+21:48:01 INFO     src.poly_universe  Universe: 21 tradeable BTC/ETH markets (1 page(s), 21 BTC/ETH seen)
+21:48:01 INFO     __main__  Universe refreshed: 21 markets
+21:48:30 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=6556 warmup=0 markets=21 btcusdt[σ=0.050 iv=0.341 μ=+0.199] ethusdt[σ=0.056 iv=0.535 μ=+0.003] top-raw-gap=-1.000 ()
+21:48:31 INFO     src.poly_universe  Universe: 21 tradeable BTC/ETH markets (1 page(s), 21 BTC/ETH seen)
+21:48:31 INFO     __main__  Universe refreshed: 21 markets
+21:49:00 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=7 no-book=3347 warmup=0 markets=21 btcusdt[σ=0.050 iv=0.341 μ=+0.175] ethusdt[σ=0.050 iv=0.535 μ=-0.155] top-raw-gap=-1.000 ()
+21:49:01 INFO     src.poly_universe  Universe: 21 tradeable BTC/ETH markets (1 page(s), 21 BTC/ETH seen)
+21:49:01 INFO     __main__  Universe refreshed: 21 markets
+21:49:30 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=9 no-book=2537 warmup=0 markets=21 btcusdt[σ=0.050 iv=0.341 μ=-0.196] ethusdt[σ=0.050 iv=0.535 μ=+0.159] top-raw-gap=-1.000 ()
+21:49:31 INFO     src.poly_universe  Universe: 21 tradeable BTC/ETH markets (1 page(s), 21 BTC/ETH seen)
+21:49:31 INFO     __main__  Universe refreshed: 21 markets
+21:50:00 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=6232 warmup=0 markets=21 btcusdt[σ=0.052 iv=0.341 μ=+0.187] ethusdt[σ=0.051 iv=0.535 μ=-0.148] top-raw-gap=-1.000 ()
+21:50:01 INFO     src.poly_universe  Universe: 21 tradeable BTC/ETH markets (1 page(s), 21 BTC/ETH seen)
+21:50:01 INFO     __main__  Universe refreshed: 21 markets
+21:50:30 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=9 no-book=3811 warmup=0 markets=21 btcusdt[σ=0.050 iv=0.341 μ=+0.096] ethusdt[σ=0.050 iv=0.535 μ=+0.145] top-raw-gap=-1.000 ()
+21:50:31 INFO     src.poly_universe  Universe: 21 tradeable BTC/ETH markets (1 page(s), 21 BTC/ETH seen)
+21:50:31 INFO     __main__  Universe refreshed: 21 markets
+21:51:00 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=3525 warmup=0 markets=21 btcusdt[σ=0.050 iv=0.341 μ=+0.029] ethusdt[σ=0.050 iv=0.535 μ=+0.187] top-raw-gap=-1.000 ()
+21:51:02 INFO     src.poly_universe  Universe: 21 tradeable BTC/ETH markets (1 page(s), 21 BTC/ETH seen)
+21:51:02 INFO     __main__  Universe refreshed: 21 markets
+21:51:30 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=5640 warmup=0 markets=21 btcusdt[σ=0.050 iv=0.341 μ=-0.160] ethusdt[σ=0.052 iv=0.535 μ=+0.058] top-raw-gap=-1.000 ()
+21:51:32 INFO     src.poly_universe  Universe: 21 tradeable BTC/ETH markets (1 page(s), 21 BTC/ETH seen)
+21:51:32 INFO     __main__  Universe refreshed: 21 markets
+21:52:00 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=5961 warmup=0 markets=21 btcusdt[σ=0.050 iv=0.341 μ=-0.033] ethusdt[σ=0.059 iv=0.535 μ=+0.056] top-raw-gap=-1.000 ()
+21:52:02 INFO     src.poly_universe  Universe: 21 tradeable BTC/ETH markets (1 page(s), 21 BTC/ETH seen)
+21:52:02 INFO     __main__  Universe refreshed: 21 markets
+21:52:30 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=39 no-book=3625 warmup=0 markets=21 btcusdt[σ=0.050 iv=0.341 μ=+0.189] ethusdt[σ=0.068 iv=0.535 μ=+0.135] top-raw-gap=-1.000 ()
+21:52:32 INFO     src.poly_universe  Universe: 21 tradeable BTC/ETH markets (1 page(s), 21 BTC/ETH seen)
+21:52:32 INFO     __main__  Universe refreshed: 21 markets
