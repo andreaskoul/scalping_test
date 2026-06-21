@@ -37,6 +37,22 @@ class Fill:
     edge: float
     paper: bool
     order_id: str = ""
+    # F1 enrichment — lets pnl_attribution slice by TTE / maker / source and
+    # run a calibration audit (p_star vs realised outcome) without re-fetching.
+    expiry_ts: float = 0.0
+    tte_at_fill: float = 0.0
+    is_maker: bool = False
+    source: str = "model"
+    question: str = ""
+
+
+# Column order for the fills table (single source of truth for schema,
+# migration, and INSERT).
+FILL_COLUMNS = [
+    "ts", "market_id", "token_id", "side", "price", "size", "fee",
+    "p_star", "edge", "paper", "order_id",
+    "expiry_ts", "tte_at_fill", "is_maker", "source", "question",
+]
 
 
 class Executor:
@@ -53,9 +69,24 @@ class Executor:
             """CREATE TABLE IF NOT EXISTS fills (
                 ts REAL, market_id TEXT, token_id TEXT, side TEXT,
                 price REAL, size REAL, fee REAL, p_star REAL, edge REAL,
-                paper INTEGER, order_id TEXT
+                paper INTEGER, order_id TEXT,
+                expiry_ts REAL, tte_at_fill REAL, is_maker INTEGER,
+                source TEXT, question TEXT
             )"""
         )
+        # Migrate pre-F1 databases: add any column the running schema expects
+        # but an older file is missing. ALTER TABLE ADD COLUMN is cheap and
+        # idempotent here because we only add what PRAGMA reports as absent.
+        cur = await self._db.execute("PRAGMA table_info(fills)")
+        existing = {row[1] for row in await cur.fetchall()}
+        await cur.close()
+        _coltypes = {
+            "expiry_ts": "REAL", "tte_at_fill": "REAL", "is_maker": "INTEGER",
+            "source": "TEXT", "question": "TEXT",
+        }
+        for col, typ in _coltypes.items():
+            if col not in existing:
+                await self._db.execute(f"ALTER TABLE fills ADD COLUMN {col} {typ}")
         await self._db.commit()
 
         if not self.paper and private_key:
@@ -104,6 +135,8 @@ class Executor:
             if not order_id:
                 return None
 
+        market = getattr(signal, "market", None)
+        expiry_ts = float(getattr(market, "expiry_ts", 0.0) or 0.0)
         fill = Fill(
             ts=time.time(),
             market_id=signal.market.condition_id,
@@ -116,6 +149,11 @@ class Executor:
             edge=signal.edge,
             paper=self.paper,
             order_id=order_id,
+            expiry_ts=expiry_ts,
+            tte_at_fill=(expiry_ts - time.time()) if expiry_ts else 0.0,
+            is_maker=bool(getattr(signal, "is_maker", False)),
+            source=getattr(signal, "source", "model"),
+            question=str(getattr(market, "question", "") or ""),
         )
         await self._record(fill)
         self._update_position(fill)
@@ -154,12 +192,16 @@ class Executor:
 
     async def _record(self, fill: Fill) -> None:
         if self._db:
+            cols = ", ".join(FILL_COLUMNS)
+            ph = ", ".join("?" for _ in FILL_COLUMNS)
             await self._db.execute(
-                "INSERT INTO fills VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                f"INSERT INTO fills ({cols}) VALUES ({ph})",
                 (
                     fill.ts, fill.market_id, fill.token_id, fill.side,
                     fill.price, fill.size, fill.fee, fill.p_star, fill.edge,
                     int(fill.paper), fill.order_id,
+                    fill.expiry_ts, fill.tte_at_fill, int(fill.is_maker),
+                    fill.source, fill.question,
                 ),
             )
             await self._db.commit()
