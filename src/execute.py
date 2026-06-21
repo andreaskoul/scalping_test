@@ -80,16 +80,24 @@ class Executor:
             raise
 
     async def execute(self, signal: Signal) -> Fill | None:
-        fee = 0.0
-        from .pricing import taker_fee_per_share, FEE_RATE_CRYPTO
-        fee = taker_fee_per_share(signal.price, FEE_RATE_CRYPTO) * signal.size
+        from .pricing import taker_fee_per_share, maker_rebate_per_share, FEE_RATE_CRYPTO
+        fee_rate = getattr(getattr(signal, "market", None), "fee_rate", FEE_RATE_CRYPTO)
+        if getattr(signal, "is_maker", False):
+            # Maker/post-only: pay no taker fee and accrue a rebate (negative
+            # fee = credit).  Paper mode assumes the resting order fills, which
+            # is optimistic on fill probability — see RUNBOOK.
+            fee = -maker_rebate_per_share(signal.price) * signal.size
+        else:
+            fee = taker_fee_per_share(signal.price, fee_rate) * signal.size
         order_id = ""
 
         if self.paper:
             order_id = f"paper-{int(time.time()*1000)}"
             log.info(
-                "[PAPER] %s %g shares @ %.4f (fee=%.4f edge=%.4f)",
+                "[PAPER] %s %s %g shares @ %.4f (fee=%.4f edge=%.4f src=%s)",
+                "MAKER" if getattr(signal, "is_maker", False) else "TAKER",
                 signal.side.value, signal.size, signal.price, fee, signal.edge,
+                getattr(signal, "source", "model"),
             )
         else:
             order_id = await self._send_live(signal)
@@ -126,9 +134,12 @@ class Executor:
                 size=signal.size,
                 side=signal.side.value,
             )
+            # Maker → resting GTC (post-only price is non-crossing by
+            # construction); taker → FAK (fill-and-kill / IOC).
+            otype = OrderType.GTC if getattr(signal, "is_maker", False) else OrderType.FAK
             resp = await loop.run_in_executor(
                 None,
-                lambda: self._clob.create_and_post_order(args, OrderType.FAK),
+                lambda: self._clob.create_and_post_order(args, otype),
             )
             order_id = resp.get("orderID", resp.get("id", ""))
             log.info("[LIVE] order %s sent, response: %s", order_id, resp)

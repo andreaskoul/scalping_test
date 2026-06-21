@@ -95,6 +95,17 @@ class ArbLeg:
 
 
 @dataclass
+class ComboArb:
+    """A general multi-leg arbitrage: every leg is taken simultaneously."""
+    arb_id: str
+    kind: str                   # "strike" | "rebalance" | "bucket"
+    legs: list[ArbLeg]
+    net_credit: float
+    notional: float
+    note: str = ""
+
+
+@dataclass
 class StrikeArb:
     """A risk-free strike-monotonicity bull-spread."""
     symbol: str
@@ -240,3 +251,143 @@ def find_strike_arbs(
             )
 
     return out
+
+
+def _strike_to_combo(s: StrikeArb) -> ComboArb:
+    return ComboArb(
+        arb_id=s.arb_id, kind="strike",
+        legs=[s.leg_low, s.leg_high],
+        net_credit=s.net_credit, notional=s.notional, note=s.note,
+    )
+
+
+def find_rebalance_arbs(
+    markets: list[PolyMarket],
+    poly_ws: PolyWS,
+    min_credit: float = DEFAULT_MIN_CREDIT,
+    max_notional_usd: float = DEFAULT_MAX_NOTIONAL_USD,
+    min_tte_secs: float = 60.0,
+    max_tte_secs: float = 86400.0,
+) -> list[ComboArb]:
+    """Market-rebalancing arb: buy YES *and* NO when ask_YES + ask_NO < $1.
+
+    The old code asserted this was 'structurally unreachable' on the CLOB.
+    DRADIS and others exploit it on CLOB v2, so we scan for it directly:
+    buying both legs guarantees a $1 payoff at resolution for a sub-$1 cost.
+    """
+    import time as _t
+    out: list[ComboArb] = []
+    now = _t.time()
+    for m in markets:
+        tte = m.expiry_ts - now
+        if tte < min_tte_secs or tte > max_tte_secs:
+            continue
+        yb = poly_ws.snapshot(m.yes_token_id)
+        nb = poly_ws.snapshot(m.no_token_id)
+        if yb is None or nb is None:
+            continue
+        ask_yes, ask_no = yb.best_ask, nb.best_ask
+        if ask_yes <= 0 or ask_no <= 0 or ask_yes >= 1 or ask_no >= 1:
+            continue
+        fee = (
+            taker_fee_per_share(ask_yes, getattr(m, "fee_rate", 0.07), getattr(m, "fee_exponent", 1.0))
+            + taker_fee_per_share(ask_no, getattr(m, "fee_rate", 0.07), getattr(m, "fee_exponent", 1.0))
+        )
+        credit = 1.0 - ask_yes - ask_no - fee
+        if credit < min_credit:
+            continue
+        unit_cost = ask_yes + ask_no
+        shares = round(min(max_notional_usd / unit_cost, yb.ask_size, nb.ask_size), 2)
+        if shares < 1.0:
+            continue
+        arb_id = f"rebal-{m.condition_id[:10]}-{int(m.expiry_ts)}"
+        legs = [
+            ArbLeg(m, m.yes_token_id, "BUY", ask_yes, shares, fee / 2),
+            ArbLeg(m, m.no_token_id, "BUY", ask_no, shares, fee / 2),
+        ]
+        out.append(ComboArb(
+            arb_id=arb_id, kind="rebalance", legs=legs,
+            net_credit=credit, notional=shares * unit_cost,
+            note=f"BUY YES@{ask_yes:.3f}+NO@{ask_no:.3f} credit={credit:.4f}",
+        ))
+        log.info("Rebalance-arb [%s]: YES@%.4f + NO@%.4f credit=%.4f size=%.1f",
+                 m.symbol, ask_yes, ask_no, credit, shares)
+    return out
+
+
+def find_bucket_arbs(
+    markets: list[PolyMarket],
+    poly_ws: PolyWS,
+    min_credit: float = DEFAULT_MIN_CREDIT,
+    max_notional_usd: float = DEFAULT_MAX_NOTIONAL_USD,
+    min_tte_secs: float = 60.0,
+    max_tte_secs: float = 86400.0,
+) -> list[ComboArb]:
+    """Box/bucket arb on the threshold ladder.
+
+    For K_low < K_high at the same (symbol, expiry): buying YES(K_low) and
+    NO(K_high) pays at least $1 in every outcome (and $2 when K_low<S<=K_high).
+    If ask_YES(K_low) + ask_NO(K_high) < $1 − fees, that floor-$1 payoff costs
+    less than $1 → arbitrage with positive skew.
+    """
+    out: list[ComboArb] = []
+    for (sym, exp_ts), ladder in _ladder(markets).items():
+        import time as _t
+        tte = exp_ts - _t.time()
+        if tte < min_tte_secs or tte > max_tte_secs or len(ladder) < 2:
+            continue
+        for i in range(len(ladder) - 1):
+            m_low, m_high = ladder[i], ladder[i + 1]
+            yb_low = poly_ws.snapshot(m_low.yes_token_id)
+            nb_high = poly_ws.snapshot(m_high.no_token_id)
+            if yb_low is None or nb_high is None:
+                continue
+            ay, an = yb_low.best_ask, nb_high.best_ask
+            if ay <= 0 or an <= 0 or ay >= 1 or an >= 1:
+                continue
+            fee = (
+                taker_fee_per_share(ay, getattr(m_low, "fee_rate", 0.07))
+                + taker_fee_per_share(an, getattr(m_high, "fee_rate", 0.07))
+            )
+            credit = 1.0 - ay - an - fee
+            if credit < min_credit:
+                continue
+            unit = ay + an
+            shares = round(min(max_notional_usd / unit, yb_low.ask_size, nb_high.ask_size), 2)
+            if shares < 1.0:
+                continue
+            arb_id = f"bucket-{sym}-{int(exp_ts)}-{i}"
+            legs = [
+                ArbLeg(m_low, m_low.yes_token_id, "BUY", ay, shares, fee / 2),
+                ArbLeg(m_high, m_high.no_token_id, "BUY", an, shares, fee / 2),
+            ]
+            out.append(ComboArb(
+                arb_id=arb_id, kind="bucket", legs=legs,
+                net_credit=credit, notional=shares * unit,
+                note=f"BUY YES K={m_low.strike:.0f}@{ay:.3f} + NO K={m_high.strike:.0f}@{an:.3f}",
+            ))
+            log.info("Bucket-arb [%s exp=%d]: YES K=%.0f@%.4f + NO K=%.0f@%.4f credit=%.4f",
+                     sym, int(exp_ts), m_low.strike, ay, m_high.strike, an, credit)
+    return out
+
+
+def scan_combos(
+    markets: list[PolyMarket],
+    poly_ws: PolyWS,
+    min_credit: float = DEFAULT_MIN_CREDIT,
+    max_notional_usd: float = DEFAULT_MAX_NOTIONAL_USD,
+    min_tte_secs: float = 60.0,
+    max_tte_secs: float = 86400.0,
+    rebalance: bool = True,
+    bucket: bool = True,
+) -> list[ComboArb]:
+    """All single-venue combinatorial arbs as a unified ComboArb list."""
+    combos = [
+        _strike_to_combo(s) for s in find_strike_arbs(
+            markets, poly_ws, min_credit, max_notional_usd, min_tte_secs, max_tte_secs)
+    ]
+    if rebalance:
+        combos += find_rebalance_arbs(markets, poly_ws, min_credit, max_notional_usd, min_tte_secs, max_tte_secs)
+    if bucket:
+        combos += find_bucket_arbs(markets, poly_ws, min_credit, max_notional_usd, min_tte_secs, max_tte_secs)
+    return combos

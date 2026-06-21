@@ -36,16 +36,23 @@ load_dotenv()
 
 import aiohttp
 
-from .arbitrage import find_strike_arbs
+from .arbitrage import scan_combos
 from .binance_ws import BinanceWS
 from .category import CategoryTracker
+from .config import Settings
 from .deribit_iv import DeribitIV
 from .execute import Executor
+from .funding import FundingOracle
+from .kalshi import KalshiClient, find_xvenue_arbs
+from .meanrev import MeanReversionTracker
+from .microstructure import DirectionalModel, MicrostructureEngine, MicroFeatures
 from .poly_universe import fetch_active_markets
 from .poly_ws import PolyWS
 from .pricing import implied_prob, SIGMA_MIN
+from .resolution import PriceToBeatCache
 from .risk import RiskManager
 from .signal import Side, Signal, SignalGenerator
+from .sizing import kelly_size
 
 log = logging.getLogger(__name__)
 
@@ -75,13 +82,28 @@ async def _universe_refresher(
     poly_ws: PolyWS,
     binance_clients: dict,
     state: dict,
+    price_to_beat: "PriceToBeatCache | None" = None,
+    use_ptb: bool = False,
 ) -> None:
     """Refresh the market universe in the background without blocking the
     eval loop. Writes the new market list and per-symbol partition into
-    `state` atomically."""
+    `state` atomically.
+
+    When `use_ptb` is set, Up/Down strikes are anchored to the real Chainlink
+    Price-to-Beat (window-open reference) here — off the hot path — replacing
+    the old first-observation hack that forced SKIP_UPDOWN."""
     while True:
         try:
             markets = await fetch_active_markets(session)
+            if use_ptb and price_to_beat is not None:
+                for m in markets:
+                    if m.is_updown and m.strike <= 0:
+                        try:
+                            k = await price_to_beat.anchored_strike(session, m)
+                            if k:
+                                m.strike = k
+                        except Exception as exc:
+                            log.debug("Price-to-Beat anchor failed: %s", exc)
             token_ids = []
             by_symbol: dict[str, list] = {sym: [] for sym in binance_clients}
             missing: dict[str, int] = {}
@@ -112,6 +134,32 @@ async def _universe_refresher(
         await asyncio.sleep(UNIVERSE_REFRESH_SECS)
 
 
+async def _xvenue_loop(
+    session: aiohttp.ClientSession,
+    kalshi: KalshiClient,
+    poly_ws: PolyWS,
+    state: dict,
+    min_credit: float,
+    interval: float = 5.0,
+) -> None:
+    """Detect Polymarket↔Kalshi cross-venue lock-$1 arbs and log them.
+
+    Detect-and-log only: two-venue *execution* needs Kalshi credentials and a
+    Kalshi executor (see kalshi.py / RUNBOOK).  Surfacing the opportunity is
+    the first, safe step."""
+    while True:
+        try:
+            kalshi_markets = await kalshi.fetch_btc_markets(session)
+            markets = state.get("markets", [])
+            if kalshi_markets and markets:
+                arbs = find_xvenue_arbs(markets, poly_ws, kalshi_markets, min_credit=min_credit)
+                if arbs:
+                    log.info("X-VENUE: %d cross-venue opportunities this scan", len(arbs))
+        except Exception as exc:
+            log.debug("X-venue scan failed: %s", exc)
+        await asyncio.sleep(interval)
+
+
 async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0) -> None:
     _setup_logging(log_level)
 
@@ -135,13 +183,16 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
     max_tte_secs = float(os.getenv("MAX_TTE_SECS", "3600"))
     book_max_age_secs = float(os.getenv("BOOK_MAX_AGE_SECS", "2.0"))
 
+    cfg = Settings.from_env()
+    effective_skip_updown = skip_updown and not cfg.use_price_to_beat
+
     mode = "PAPER" if paper else "LIVE"
     log.info("=== Polymarket-vs-Binance arb bot starting [%s] ===", mode)
     log.info(
         "Binance symbols: %s | safety_eps=%.4f cooldown=%.1fs notional<=%.0f "
         "| price=[%.2f,%.2f] σ_floor=%.2f tte=[%.0f,%.0f]s skip_updown=%s",
         symbols, safety_eps, cooldown, max_notional,
-        price_min, price_max, sigma_floor, min_tte_secs, max_tte_secs, skip_updown,
+        price_min, price_max, sigma_floor, min_tte_secs, max_tte_secs, effective_skip_updown,
     )
     if duration_secs > 0:
         log.info("Will stop after %.0f seconds and print PnL summary.", duration_secs)
@@ -153,6 +204,30 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
     max_walk_slippage = float(os.getenv("MAX_WALK_SLIPPAGE", "0.05"))
     arb_min_credit = float(os.getenv("ARB_MIN_CREDIT", "0.01"))
     arb_enabled = os.getenv("ARB_ENABLED", "1") not in ("0", "false", "False")
+
+    # ---- research-driven overlays (max-EV config; see RUNBOOK.md) ----
+    log.info("Overlays: %s", cfg.summary())
+    funding_oracle = FundingOracle(symbols)
+    micro_engine = MicrostructureEngine(
+        model=DirectionalModel.load(),
+        obi_veto=cfg.obi_veto,
+        obi_veto_threshold=cfg.obi_veto_threshold,
+        momentum_enabled=cfg.momentum_enabled,
+        impulse_fade_enabled=cfg.impulse_fade_enabled,
+        momentum_min_move_usd=cfg.momentum_min_move_usd,
+        momentum_near_expiry_secs=cfg.momentum_window_secs,
+    )
+    price_to_beat = PriceToBeatCache()
+    meanrev = (
+        MeanReversionTracker(
+            band=cfg.meanrev_band,
+            half_life_secs=cfg.meanrev_half_life_secs,
+            max_hold_secs=cfg.meanrev_max_hold_secs,
+        )
+        if cfg.meanrev_enabled else None
+    )
+    kalshi_client = KalshiClient(cfg.kalshi_api_base) if cfg.xvenue_enabled else None
+
     signal_gen = SignalGenerator(
         max_notional_per_trade=max_notional,
         safety_eps=safety_eps,
@@ -160,7 +235,7 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
         price_min=price_min,
         price_max=price_max,
         sigma_floor=sigma_floor,
-        skip_updown=skip_updown,
+        skip_updown=effective_skip_updown,
         min_tte_secs=min_tte_secs,
         max_tte_secs=max_tte_secs,
         book_max_age_secs=book_max_age_secs,
@@ -168,6 +243,18 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
         poly_ws=poly_ws,
         effective_spread_mult=effective_spread_mult,
         max_walk_slippage=max_walk_slippage,
+        longshot_tilt_mult=cfg.longshot_tilt_mult,
+        skew_coef=cfg.skew_coef,
+        sell_price_min=cfg.sell_price_min,
+        micro_engine=micro_engine,
+        ml_overlay=cfg.ml_overlay,
+        ml_weight=cfg.ml_weight,
+        obi_veto=cfg.obi_veto,
+        obi_veto_threshold=cfg.obi_veto_threshold,
+        kelly_enabled=cfg.kelly_enabled,
+        kelly_fraction=cfg.kelly_fraction,
+        maker_enabled=cfg.maker_enabled,
+        maker_join_ticks=cfg.maker_join_ticks,
     )
     risk = RiskManager(
         max_notional_per_trade=max_notional,
@@ -199,10 +286,19 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
     ]
     tasks.append(asyncio.create_task(poly_ws.run(), name="poly-ws"))
     tasks.append(asyncio.create_task(iv_oracle.run(), name="deribit-iv"))
+    tasks.append(asyncio.create_task(funding_oracle.run(), name="funding"))
     tasks.append(asyncio.create_task(
-        _universe_refresher(session, poly_ws, binance_clients, universe_state),
+        _universe_refresher(
+            session, poly_ws, binance_clients, universe_state,
+            price_to_beat=price_to_beat, use_ptb=cfg.use_price_to_beat,
+        ),
         name="universe",
     ))
+    if kalshi_client is not None:
+        tasks.append(asyncio.create_task(
+            _xvenue_loop(session, kalshi_client, poly_ws, universe_state, cfg.xvenue_min_credit),
+            name="xvenue",
+        ))
 
     # Heartbeat-window cumulative counters.
     cum_eval = cum_no_spot = cum_no_book = cum_warmup = cum_signals = cum_fills = 0
@@ -278,8 +374,14 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
                     cum_no_spot += 1
                     continue
 
-                # Up/Down markets — anchor strike to live spot first time.
+                # Up/Down strike anchoring. With Price-to-Beat on, the
+                # refresher anchors to the real Chainlink window-open ref; if
+                # it hasn't yet, skip rather than fall back to the biased
+                # first-observation hack. Threshold markets already have a
+                # parsed strike, so this only gates unanchored Up/Down.
                 if market.strike <= 0:
+                    if market.is_updown and cfg.use_price_to_beat:
+                        continue
                     market.strike = tick.mid
 
                 yes_book = poly_ws.snapshot(market.yes_token_id)
@@ -306,7 +408,47 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
                 if cat_key in blacklist:
                     continue
 
-                signal = signal_gen.evaluate(market, tick, yes_book)
+                # Microstructure features + perp-funding carry for this market.
+                feats = MicroFeatures(
+                    ofi=bc.ofi_ratio(),
+                    ret_fast=bc.recent_return(5.0),
+                    ret_slow=bc.recent_return(60.0),
+                    rvol=tick.sigma_annual,
+                    spread_rel=((tick.ask - tick.bid) / tick.mid) if tick.mid > 0 else 0.0,
+                    move_window_usd=bc.price_move(cfg.momentum_window_secs),
+                    secs_to_expiry=market.expiry_ts - now_wall,
+                )
+                carry = 0.0
+                if cfg.carry_from_funding:
+                    carry += funding_oracle.carry(market.symbol)
+                carry += funding_oracle.fade_drift(market.symbol)
+
+                signal = signal_gen.evaluate(
+                    market, tick, yes_book, features=feats, carry_annual=carry,
+                )
+
+                # Mean-reversion overlay (Portnaya 4h half-life) — fires when
+                # D_t = P_poly - P_fair stretches beyond its own EWMA. Fed each
+                # tick; only emits a fade when the model leg is quiet.
+                if signal is None and meanrev is not None:
+                    p_fair, _ = signal_gen.fair_prob(market, tick, carry)
+                    intent = meanrev.update(
+                        market.yes_token_id, p_fair, yes_book.best_bid, yes_book.best_ask,
+                    )
+                    if intent is not None and intent.price > 0:
+                        if cfg.kelly_enabled:
+                            msz = kelly_size(intent.p_fair, intent.price, intent.side,
+                                             max_notional, cfg.kelly_fraction)
+                        else:
+                            msz = round(max_notional / intent.price, 2)
+                        if msz and msz >= 1.0:
+                            signal = Signal(
+                                market=market, token_id=market.yes_token_id,
+                                side=Side(intent.side), price=intent.price, size=round(msz, 2),
+                                p_star=intent.p_fair, edge=abs(intent.deviation), sigma=0.0,
+                                source="meanrev",
+                            )
+
                 if signal is None:
                     # Track the largest raw mispricing visible — diagnostic
                     # for the heartbeat. No extra p* call: re-derive from
@@ -352,64 +494,52 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
             # don't always cross-link instantly. Reference:
             # arXiv:2508.03474 (Saguillo et al, AFT 2025) — combinatorial
             # arbitrage extracted ~$40M from Polymarket in 2024–25.
-            if arb_enabled:
-                arbs = find_strike_arbs(
+            if cfg.arb_enabled:
+                combos = scan_combos(
                     markets, poly_ws,
-                    min_credit=arb_min_credit,
+                    min_credit=cfg.arb_min_credit,
                     max_notional_usd=max_notional,
                     min_tte_secs=min_tte_secs,
                     max_tte_secs=max_tte_secs,
+                    rebalance=cfg.rebalance_arb_enabled,
+                    bucket=cfg.bucket_arb_enabled,
                 )
-                for arb in arbs:
+                for combo in combos:
                     cum_arbs += 1
-                    # Emit two paired Signals tagged with shared arb_id
-                    # so the PnL accountant can match the legs.
-                    sig_buy = Signal(
-                        market=arb.leg_low.market,
-                        token_id=arb.leg_low.token_id,
-                        side=Side.BUY,
-                        price=arb.leg_low.price,
-                        size=arb.leg_low.size,
-                        p_star=0.0,         # n/a for model-free arb
-                        edge=arb.net_credit,
-                        sigma=0.0,
-                        arb_id=arb.arb_id,
-                    )
-                    sig_sell = Signal(
-                        market=arb.leg_high.market,
-                        token_id=arb.leg_high.token_id,
-                        side=Side.SELL,
-                        price=arb.leg_high.price,
-                        size=arb.leg_high.size,
-                        p_star=0.0,
-                        edge=arb.net_credit,
-                        sigma=0.0,
-                        arb_id=arb.arb_id,
-                    )
-                    # Risk-check both legs as a unit.
-                    ok1, r1 = risk.check(sig_buy, binance_ts=now_mono, poly_ts=now_mono)
-                    ok2, r2 = risk.check(sig_sell, binance_ts=now_mono, poly_ts=now_mono)
-                    if not (ok1 and ok2):
-                        log.debug("Arb %s blocked by risk: %s / %s", arb.arb_id, r1, r2)
+                    # One Signal per leg, all tagged with the shared arb_id so
+                    # the PnL accountant can match them. Strike arbs have a
+                    # BUY+SELL pair; rebalance/bucket arbs are BUY+BUY.
+                    sigs = [
+                        Signal(
+                            market=leg.market, token_id=leg.token_id, side=Side(leg.side),
+                            price=leg.price, size=leg.size, p_star=0.0,
+                            edge=combo.net_credit, sigma=0.0,
+                            arb_id=combo.arb_id, source="arb",
+                        )
+                        for leg in combo.legs
+                    ]
+                    if not all(
+                        risk.check(s, binance_ts=now_mono, poly_ts=now_mono)[0] for s in sigs
+                    ):
+                        log.debug("Combo %s blocked by risk", combo.arb_id)
                         continue
-                    f1 = await executor.execute(sig_buy)
-                    if f1 is None:
-                        risk.record_error()
-                        continue
-                    f2 = await executor.execute(sig_sell)
-                    if f2 is None:
-                        # Leg-1 filled, leg-2 didn't — orphan (paper mode
-                        # never hits this; live mode would need to flatten).
-                        log.warning("Arb %s leg-2 failed; leg-1 orphaned.", arb.arb_id)
-                        risk.record_error()
-                        continue
-                    cum_arb_fills += 1
-                    risk.record_fill(f1.price * f1.size)
-                    risk.record_fill(f2.price * f2.size)
-                    log.info(
-                        "ARB EXECUTED %s credit=%.4f notional=%.2f",
-                        arb.arb_id, arb.net_credit, arb.notional,
-                    )
+                    legs_ok = True
+                    for s in sigs:
+                        f = await executor.execute(s)
+                        if f is None:
+                            # Live mode would need to flatten the filled legs.
+                            log.warning("Combo %s leg failed; remaining legs orphaned.", combo.arb_id)
+                            risk.record_error()
+                            legs_ok = False
+                            break
+                        risk.record_fill(f.price * f.size)
+                    if legs_ok:
+                        cum_arb_fills += 1
+                        log.info(
+                            "ARB EXECUTED %s [%s] credit=%.4f notional=%.2f legs=%d",
+                            combo.arb_id, combo.kind, combo.net_credit,
+                            combo.notional, len(combo.legs),
+                        )
 
             # ---- Heartbeat (cumulative over window) ----
             if (now_mono - last_heartbeat) > HEARTBEAT_SECS:

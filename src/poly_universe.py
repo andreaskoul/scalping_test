@@ -62,6 +62,7 @@ class PolyMarket:
     expiry_ts: float    # UTC unix timestamp
     tick_size: float    # from API; default 0.01
     symbol: str = "btcusdt"  # Binance feed to use
+    slug: str = ""      # market slug — encodes the Up/Down window (e.g. btc-updown-5m-<unix>)
     # Cached structural flags computed once at universe-load time so the
     # signal generator doesn't have to re-derive them every tick.
     is_updown: bool = False
@@ -262,6 +263,7 @@ async def fetch_active_markets(
                     expiry_ts=expiry_ts,
                     tick_size=tick,
                     symbol=symbol,
+                    slug=str(m.get("slug", "")),
                     is_updown=is_updown,
                     is_threshold=is_threshold,
                     fee_rate=fee_rate,

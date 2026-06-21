@@ -75,6 +75,10 @@ class _State:
     flow: Deque[tuple[float, float, float]] = field(
         default_factory=lambda: deque(maxlen=8192)
     )
+    # Rolling (ts, mid) for momentum / lagged-return microstructure features.
+    mids: Deque[tuple[float, float]] = field(
+        default_factory=lambda: deque(maxlen=4096)
+    )
 
 
 class BinanceWS:
@@ -145,6 +149,46 @@ class BinanceWS:
         self._drift_cache = (now, drift)
         return drift
 
+    # ---- microstructure feature accessors (Deep et al. 2025) ----
+
+    def _mid_at_or_before(self, cutoff: float) -> float | None:
+        for ts, mid in reversed(self._state.mids):
+            if ts <= cutoff:
+                return mid
+        return None
+
+    def price_move(self, window_secs: float) -> float:
+        """Signed $ move of the mid over the trailing window (0 if unknown)."""
+        mids = self._state.mids
+        if not mids:
+            return 0.0
+        now, cur = mids[-1]
+        old = self._mid_at_or_before(now - window_secs)
+        return 0.0 if old is None else (cur - old)
+
+    def recent_return(self, window_secs: float) -> float:
+        """Trailing log-return of the mid over the window (0 if unknown)."""
+        mids = self._state.mids
+        if not mids:
+            return 0.0
+        now, cur = mids[-1]
+        old = self._mid_at_or_before(now - window_secs)
+        if old is None or old <= 0 or cur <= 0:
+            return 0.0
+        return math.log(cur / old)
+
+    def ofi_ratio(self) -> float:
+        """Signed/abs dollar-flow ratio over the OFI window, in [-1, 1]."""
+        now = time.monotonic()
+        cutoff = now - OFI_WINDOW_SECS
+        signed = abs_vol = 0.0
+        for ts, sdv, adv in self._state.flow:
+            if ts < cutoff:
+                continue
+            signed += sdv
+            abs_vol += adv
+        return 0.0 if abs_vol <= 0 else max(-1.0, min(1.0, signed / abs_vol))
+
     async def run(self) -> None:
         """Loop forever, reconnecting with back-off."""
         delay = RECONNECT_BASE
@@ -183,6 +227,7 @@ class BinanceWS:
             try:
                 self._state.bid = float(data["b"])
                 self._state.ask = float(data["a"])
+                self._state.mids.append((now, (self._state.bid + self._state.ask) / 2.0))
                 self._ts = now
                 # Wake the orchestrator. set() is a no-op if already set,
                 # so the cost when nothing is awaiting is essentially nil.

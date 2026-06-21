@@ -1,5 +1,7 @@
 .env
 *.db
+category_state.json
+model_weights.json
 *.pyc
 __pycache__/
 .pytest_cache/

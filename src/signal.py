@@ -35,10 +35,20 @@ import logging
 from dataclasses import dataclass
 from enum import Enum
 
-from .pricing import implied_prob, taker_fee_per_share, FEE_RATE_CRYPTO
+from .pricing import (
+    implied_prob,
+    taker_fee_per_share,
+    maker_rebate_per_share,
+    skew_adjusted_sigma,
+    wedge_estimate,
+    physical_to_risk_neutral,
+    FEE_RATE_CRYPTO,
+)
 from .poly_universe import PolyMarket
 from .binance_ws import BinanceTick
 from .poly_ws import BookSnapshot
+from .microstructure import MicroFeatures, order_book_imbalance
+from .sizing import kelly_size
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +70,8 @@ class Signal:
     sigma: float
     arb_id: str = ""        # set on multi-leg static-arb signals so PnL
                             # accounting can pair the legs
+    is_maker: bool = False  # post-only resting order → earns rebate, pays no taker fee
+    source: str = "model"   # model | meanrev | arb | xvenue — for attribution
 
 
 class SignalGenerator:
@@ -86,6 +98,22 @@ class SignalGenerator:
         # measured as |VWAP - best| / best. 5% means a $0.50 ask can cost
         # at most $0.525 effective; beyond that we don't want the trade.
         max_walk_slippage: float = 0.05,
+        # ---- research-driven overlays (all OFF by default for backward
+        # compatibility; main.py turns them on from the max-EV config) ----
+        longshot_tilt_mult: float = 0.0,      # Portnaya favourite-longshot haircut on BUY
+        skew_coef: float = 0.0,               # smile bump for OTM strikes
+        sell_price_min: float | None = None,  # re-admit the low tail on SELL only
+        micro_engine=None,                    # MicrostructureEngine (OFI/OBI/momentum)
+        ml_overlay: bool = False,
+        ml_weight: float = 0.0,
+        obi_veto: bool = False,
+        obi_veto_threshold: float = -0.60,
+        kelly_enabled: bool = False,
+        kelly_fraction: float = 0.30,
+        maker_enabled: bool = False,
+        maker_join_ticks: int = 1,
+        ml_horizon_secs: float = 300.0,
+        nudge_cap: float = 0.10,
     ):
         self.max_notional = max_notional_per_trade
         self.safety_eps = safety_eps
@@ -102,7 +130,48 @@ class SignalGenerator:
         self.poly_ws = poly_ws
         self.effective_spread_mult = effective_spread_mult
         self.max_walk_slippage = max_walk_slippage
+        self.longshot_tilt_mult = longshot_tilt_mult
+        self.skew_coef = skew_coef
+        self.sell_price_min = sell_price_min if sell_price_min is not None else price_min
+        self.micro_engine = micro_engine
+        self.ml_overlay = ml_overlay
+        self.ml_weight = ml_weight
+        self.obi_veto = obi_veto
+        self.obi_veto_threshold = obi_veto_threshold
+        self.kelly_enabled = kelly_enabled
+        self.kelly_fraction = kelly_fraction
+        self.maker_enabled = maker_enabled
+        self.maker_join_ticks = maker_join_ticks
+        self.ml_horizon_secs = ml_horizon_secs
+        self.nudge_cap = nudge_cap
         self._last_fire: dict[str, float] = {}  # token_id → monotonic ts
+
+    def _sigma_used(self, market: PolyMarket, binance: BinanceTick) -> float:
+        sigma_iv = 0.0
+        if self.iv_oracle is not None:
+            iv_snap = self.iv_oracle.snapshot(binance.symbol)
+            if iv_snap is not None:
+                sigma_iv = iv_snap.sigma_annual
+        sigma_used = max(binance.sigma_annual, sigma_iv, self.sigma_floor)
+        if self.skew_coef and market.strike > 0 and binance.mid > 0:
+            sigma_used = skew_adjusted_sigma(sigma_used, binance.mid, market.strike, self.skew_coef)
+        return sigma_used
+
+    def fair_prob(
+        self, market: PolyMarket, binance: BinanceTick, carry_annual: float = 0.0
+    ) -> tuple[float, float]:
+        """Option-implied terminal probability + the σ used. Shared with main's
+        mean-reversion path so D_t is measured against the same fair value."""
+        sigma_used = self._sigma_used(market, binance)
+        tte = market.expiry_ts - time.time()
+        if tte <= 0 or market.strike <= 0 or binance.mid <= 0:
+            return 0.5, sigma_used
+        p = implied_prob(
+            spot=binance.mid, strike=market.strike, time_to_expiry_secs=tte,
+            sigma_annual=sigma_used, drift_annual=getattr(binance, "drift_annual", 0.0),
+            carry_annual=carry_annual,
+        )
+        return p, sigma_used
 
     def evaluate(
         self,
@@ -110,6 +179,8 @@ class SignalGenerator:
         binance: BinanceTick,
         yes_book: BookSnapshot,
         no_book: BookSnapshot | None = None,
+        features: MicroFeatures | None = None,
+        carry_annual: float = 0.0,
     ) -> Signal | None:
         """Return a Signal if an edge exists, else None."""
         now = time.monotonic()
@@ -122,11 +193,9 @@ class SignalGenerator:
         if time_to_expiry > self.max_tte_secs:
             return None
 
-        # Skip Up/Down markets — their strike is set at the official window-
-        # open time on Polymarket, not at our first observation. Anchoring
-        # to spot at first observation produces a synthetic strike that
-        # systematically biases p* away from 0.5 on pre-listed markets.
-        # Flag is precomputed at universe-load time → no per-tick string ops.
+        # Up/Down markets are now tradeable once the strike has been anchored
+        # to the real Chainlink Price-to-Beat (see resolution.py + main.py);
+        # only skip them if the legacy flag is set AND the strike is unanchored.
         if self.skip_updown and market.is_updown:
             return None
 
@@ -135,54 +204,66 @@ class SignalGenerator:
             return None
 
         # σ blend: max of EWMA realised, options-implied (Deribit), and a
-        # hard floor.  IV is the forward-vol consensus the maker bots use;
-        # using only realised would put us at a structural info disadvantage
-        # exactly when realised undershoots IV (quiet body of distribution
-        # masking real tail risk).
-        sigma_iv = 0.0
-        if self.iv_oracle is not None:
-            iv_snap = self.iv_oracle.snapshot(binance.symbol)
-            if iv_snap is not None:
-                sigma_iv = iv_snap.sigma_annual
-        sigma_used = max(binance.sigma_annual, sigma_iv, self.sigma_floor)
+        # hard floor, then a smile bump for OTM strikes (Portnaya §7.1 — ATM
+        # IV alone understates OTM fair value).
+        sigma_used = self._sigma_used(market, binance)
 
         # Require a recent Polymarket print (the book might have moved
         # several ticks since the snapshot was taken).
         if (now - yes_book.ts) > self.book_max_age_secs:
             return None
 
-        p_star = implied_prob(
+        # Fair (option-implied) terminal probability with perp-funding carry.
+        p_fair = implied_prob(
             spot=binance.mid,
             strike=market.strike,
             time_to_expiry_secs=time_to_expiry,
             sigma_annual=sigma_used,
             drift_annual=getattr(binance, "drift_annual", 0.0),
+            carry_annual=carry_annual,
         )
 
-        # --- try to BUY the YES (Up) token ---
-        signal = self._check_leg(
-            market=market,
-            token_id=market.yes_token_id,
-            side=Side.BUY,
-            p_star=p_star,
-            book=yes_book,
-            now=now,
-            sigma=sigma_used,
-        )
-        if signal:
-            return signal
+        obi = order_book_imbalance(yes_book.bid_size, yes_book.ask_size)
 
-        # --- try to SELL the YES token (equivalent to buying NO) ---
-        signal = self._check_leg(
-            market=market,
-            token_id=market.yes_token_id,
-            side=Side.SELL,
-            p_star=p_star,
-            book=yes_book,
-            now=now,
-            sigma=sigma_used,
+        # Directional microstructure nudge (OFI/ML + momentum/fade), scaled by
+        # threshold sensitivity p(1-p) and capped.  p_fair stays the truth
+        # anchor for the wedge; p_star is the nudged trading probability.
+        p_star = p_fair
+        if self.micro_engine is not None and self.ml_overlay and features is not None:
+            p_up = self.micro_engine.model.p_up(features)
+            horizon = min(time_to_expiry, self.ml_horizon_secs)
+            p_up_rn = physical_to_risk_neutral(p_up, sigma_used, horizon, carry_annual)
+            assessment = self.micro_engine.assess(features, obi, side="NEUTRAL")
+            eff_dir = 2.0 * (p_up_rn - 0.5) + 0.5 * assessment.direction_bias
+            sens = p_fair * (1.0 - p_fair)
+            nudge = max(-self.nudge_cap, min(self.nudge_cap, self.ml_weight * eff_dir * sens))
+            p_star = min(0.999, max(0.001, p_fair + nudge))
+
+        tte_hours = time_to_expiry / 3600.0
+
+        sig_buy = self._check_leg(market, market.yes_token_id, Side.BUY,
+                                  p_star, p_fair, tte_hours, yes_book, sigma_used, obi)
+        sig_sell = self._check_leg(market, market.yes_token_id, Side.SELL,
+                                   p_star, p_fair, tte_hours, yes_book, sigma_used, obi)
+
+        candidates = [s for s in (sig_buy, sig_sell) if s is not None]
+        if not candidates:
+            return None
+        best = max(candidates, key=lambda s: s.edge)
+
+        # Per-token cooldown applied once, after picking the better leg.
+        last = self._last_fire.get(best.token_id, 0.0)
+        if now - last < self.cooldown:
+            return None
+        self._last_fire[best.token_id] = now
+
+        log.info(
+            "Signal %s %s %s token=%s px=%.4f p*=%.4f p_fair=%.4f edge=%.4f σ=%.3f size=%.1f",
+            "MAKER" if best.is_maker else "TAKER", best.side.value,
+            market.question[:48], best.token_id[:12],
+            best.price, best.p_star, p_fair, best.edge, best.sigma, best.size,
         )
-        return signal
+        return best
 
     def _check_leg(
         self,
@@ -190,98 +271,100 @@ class SignalGenerator:
         token_id: str,
         side: Side,
         p_star: float,
+        p_fair: float,
+        tte_hours: float,
         book: BookSnapshot,
-        now: float,
         sigma: float,
+        obi: float,
     ) -> Signal | None:
+        # ---- OBI toxicity veto (adverse-selection gate) ----
+        if self.obi_veto:
+            if side == Side.BUY and obi < self.obi_veto_threshold:
+                return None
+            if side == Side.SELL and obi > -self.obi_veto_threshold:
+                return None
+
         if side == Side.BUY:
-            top_price = book.best_ask
-            top_size = book.ask_size
+            top_price, top_size = book.best_ask, book.ask_size
+            price_floor = self.price_min
         else:
-            top_price = book.best_bid
-            top_size = book.bid_size
-
-        # Tail filter: never sell at 0.01 or buy at 0.99. Tiny credit, $1 downside.
-        if top_price < self.price_min or top_price > self.price_max:
+            top_price, top_size = book.best_bid, book.bid_size
+            price_floor = self.sell_price_min   # re-admit the longshot tail on SELL
+        if top_price <= 0 or top_price < price_floor or top_price > self.price_max:
             return None
 
-        # ---- Sizing + walk-the-book VWAP ----
-        # If the desired size exceeds top-of-book depth we have to consume
-        # multiple levels, paying VWAP rather than the displayed best.
-        # The previous code silently assumed the whole order filled at
-        # the top — a Stoll-effective-spread error that hid 1-5% of cost
-        # on thin books.
-        if top_price <= 0:
-            return None
-        desired_shares = self.max_notional / top_price
-        if top_size > 0 and desired_shares <= top_size:
-            # Common case — fully fills at the top, VWAP == best price.
-            exec_price = top_price
-            size = round(min(desired_shares, top_size), 2)
-        elif self.poly_ws is not None:
-            vwap, available = self.poly_ws.walk_book(
-                token_id, side.value, desired_shares,
-            )
-            if vwap <= 0 or available <= 0:
-                return None
-            # Reject if walking the book would cost more than the cap.
-            slippage = abs(vwap - top_price) / top_price
-            if slippage > self.max_walk_slippage:
-                return None
-            exec_price = vwap
-            size = round(min(desired_shares, available), 2)
-        else:
-            # No level access — fall back to top-only (legacy behaviour).
-            exec_price = top_price
-            size = round(min(desired_shares, top_size if top_size > 0 else desired_shares), 2)
-
-        if size < 1.0:
-            return None
-
-        # ---- Cost model ----
-        # 1) Per-market parabolic taker fee.
-        fee = taker_fee_per_share(
-            exec_price,
-            fee_rate=getattr(market, "fee_rate", self.fee_rate),
-            fee_exponent=getattr(market, "fee_exponent", 1.0),
-        )
-
-        # 2) Effective-spread cushion (Stoll 1989 / Huang-Stoll 1997).
-        # Quoted spread is already paid implicitly by crossing best bid/
-        # ask; effective spread is typically 1.2-1.5× larger because of
-        # fleeting quotes, hidden liquidity, and adverse selection. We
-        # charge the "extra" portion as an explicit cushion so the same
-        # safety_eps doesn't have to mean different things on tight vs
-        # wide books.
+        # ---- Favourite-longshot wedge haircut (Portnaya Table 5) ----
+        wedge = wedge_estimate(p_fair, tte_hours) if self.longshot_tilt_mult else 0.0
+        buy_pen = self.longshot_tilt_mult * max(0.0, wedge)
+        sell_pen = self.longshot_tilt_mult * max(0.0, -wedge)
         quoted_spread = max(0.0, book.best_ask - book.best_bid)
         eff_spread_extra = (self.effective_spread_mult - 1.0) * quoted_spread
 
-        if side == Side.BUY:
-            edge = p_star - exec_price - fee - eff_spread_extra - self.safety_eps
-        else:
-            edge = exec_price - p_star - fee - eff_spread_extra - self.safety_eps
+        candidates: list[tuple[float, float, float, bool]] = []  # edge, px, size, is_maker
 
+        # ---- Taker variant (cross the book, pay fee + effective spread) ----
+        desired = self.max_notional / top_price
+        exec_price = None
+        size = 0.0
+        if top_size > 0 and desired <= top_size:
+            exec_price, size = top_price, round(min(desired, top_size), 2)
+        elif self.poly_ws is not None:
+            vwap, available = self.poly_ws.walk_book(token_id, side.value, desired)
+            if vwap > 0 and available > 0 and abs(vwap - top_price) / top_price <= self.max_walk_slippage:
+                exec_price, size = vwap, round(min(desired, available), 2)
+        else:
+            exec_price = top_price
+            size = round(min(desired, top_size if top_size > 0 else desired), 2)
+        if exec_price is not None and size >= 1.0:
+            fee = taker_fee_per_share(
+                exec_price, getattr(market, "fee_rate", self.fee_rate),
+                getattr(market, "fee_exponent", 1.0),
+            )
+            if side == Side.BUY:
+                edge = p_star - exec_price - fee - eff_spread_extra - self.safety_eps - buy_pen
+            else:
+                edge = exec_price - p_star - fee - eff_spread_extra - self.safety_eps - sell_pen
+            candidates.append((edge, exec_price, size, False))
+
+        # ---- Maker variant (post inside the spread, earn rebate, no taker fee) ----
+        if self.maker_enabled:
+            tick = getattr(market, "tick_size", 0.01) or 0.01
+            if side == Side.BUY:
+                mprice = round(book.best_bid + self.maker_join_ticks * tick, 4)
+                if mprice >= book.best_ask:
+                    mprice = book.best_bid
+            else:
+                mprice = round(book.best_ask - self.maker_join_ticks * tick, 4)
+                if mprice <= book.best_bid:
+                    mprice = book.best_ask
+            if mprice > 0 and price_floor <= mprice <= self.price_max:
+                rebate = maker_rebate_per_share(mprice)
+                msize = round(self.max_notional / mprice, 2)
+                if msize >= 1.0:
+                    if side == Side.BUY:
+                        medge = p_star - mprice + rebate - self.safety_eps - buy_pen
+                    else:
+                        medge = mprice - p_star + rebate - self.safety_eps - sell_pen
+                    candidates.append((medge, mprice, msize, True))
+
+        if not candidates:
+            return None
+        edge, exec_price, size, is_maker = max(candidates, key=lambda c: c[0])
         if edge <= 0:
             return None
 
-        # Cooldown gate
-        last = self._last_fire.get(token_id, 0.0)
-        if now - last < self.cooldown:
+        # ---- Fractional-Kelly cap on size ----
+        if self.kelly_enabled:
+            ks = kelly_size(p_star, exec_price, side.value, self.max_notional, self.kelly_fraction)
+            if ks <= 0:
+                return None
+            size = min(size, ks)
+        if size < 1.0:
             return None
 
-        self._last_fire[token_id] = now
-        log.info(
-            "Signal %s %s token=%s px=%.4f (top=%.4f) p*=%.4f edge=%.4f sigma=%.3f size=%.1f",
-            side.value, market.question[:60], token_id[:12],
-            exec_price, top_price, p_star, edge, sigma, size,
-        )
         return Signal(
-            market=market,
-            token_id=token_id,
-            side=side,
-            price=exec_price,
-            size=size,
-            p_star=p_star,
-            edge=edge,
-            sigma=sigma,
+            market=market, token_id=token_id, side=side,
+            price=exec_price, size=round(size, 2),
+            p_star=p_star, edge=edge, sigma=sigma,
+            is_maker=is_maker, source="model",
         )
