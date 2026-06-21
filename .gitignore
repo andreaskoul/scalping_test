@@ -2,6 +2,8 @@
 *.db
 category_state.json
 model_weights.json
+wedge_coeffs.json
+calib_coeffs.json
 *.pyc
 __pycache__/
 .pytest_cache/

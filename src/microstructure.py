@@ -64,14 +64,31 @@ def _sigmoid(x: float) -> float:
     return z / (1.0 + z)
 
 
-# Default logistic weights — OFI dominant, momentum next, per Deep et al.
-# importances. Applied to lightly-squashed features so no single term saturates.
+# Logistic feature space. p_up = sigmoid(w · transform(features)). The trainer
+# (src.ml_train) fits `w` on exactly this transform so train and inference agree.
+FEATURE_KEYS = ["bias", "ofi", "ret_fast", "ret_slow"]
+
+# Default weights — OFI dominant, momentum next, per Deep et al. importances.
+# Used as the cold-start fallback until a trained model_weights.json exists.
 _DEFAULT_WEIGHTS = {
     "bias": 0.0,
     "ofi": 2.5,
     "ret_fast": 1.2,
     "ret_slow": 0.8,
 }
+
+
+def transform_features(f: MicroFeatures) -> list[float]:
+    """Map MicroFeatures to the logistic design vector (incl. bias term).
+
+    Returns are squashed (a few bps → O(1)) so no single term saturates; OFI is
+    already bounded to [-1, 1]. Order matches FEATURE_KEYS."""
+    return [
+        1.0,
+        max(-1.0, min(1.0, f.ofi)),
+        math.tanh(f.ret_fast * 400.0),
+        math.tanh(f.ret_slow * 150.0),
+    ]
 
 
 class DirectionalModel:
@@ -87,21 +104,16 @@ class DirectionalModel:
         if os.path.exists(path):
             try:
                 with open(path) as f:
-                    return cls(json.load(f))
+                    data = json.load(f)
+                # Accept either a bare weights dict or {"weights": {...}, ...}.
+                return cls(data.get("weights", data) if isinstance(data, dict) else None)
             except Exception as exc:
                 log.warning("Failed to load %s: %s — using defaults.", path, exc)
         return cls()
 
     def p_up(self, f: MicroFeatures) -> float:
-        # Squash returns into a comparable scale (ret of a few bps → O(1)).
-        rf = math.tanh(f.ret_fast * 400.0)
-        rs = math.tanh(f.ret_slow * 150.0)
-        z = (
-            self.w.get("bias", 0.0)
-            + self.w.get("ofi", 0.0) * max(-1.0, min(1.0, f.ofi))
-            + self.w.get("ret_fast", 0.0) * rf
-            + self.w.get("ret_slow", 0.0) * rs
-        )
+        x = transform_features(f)
+        z = sum(self.w.get(k, 0.0) * xi for k, xi in zip(FEATURE_KEYS, x))
         return _sigmoid(z)
 
 
