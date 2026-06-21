@@ -275,7 +275,11 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
         binance_stale_secs=binance_stale,
         poly_stale_secs=poly_stale,
     )
-    executor = Executor(paper=paper)
+    executor = Executor(
+        paper=paper,
+        maker_fill_prob=cfg.maker_fill_prob,
+        maker_gtd_secs=cfg.maker_gtd_secs,
+    )
     await executor.setup(private_key=private_key)
 
     category_tracker = CategoryTracker.load()
@@ -552,23 +556,19 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
                     ):
                         log.debug("Combo %s blocked by risk", combo.arb_id)
                         continue
-                    legs_ok = True
-                    for s in sigs:
-                        f = await executor.execute(s)
-                        if f is None:
-                            # Live mode would need to flatten the filled legs.
-                            log.warning("Combo %s leg failed; remaining legs orphaned.", combo.arb_id)
-                            risk.record_error()
-                            legs_ok = False
-                            break
+                    # Atomic: a failed leg flattens the filled ones (orphan-safe).
+                    combo_fills = await executor.execute_atomic(sigs)
+                    if combo_fills is None:
+                        risk.record_error()
+                        continue
+                    for f in combo_fills:
                         risk.record_fill(f.price * f.size)
-                    if legs_ok:
-                        cum_arb_fills += 1
-                        log.info(
-                            "ARB EXECUTED %s [%s] credit=%.4f notional=%.2f legs=%d",
-                            combo.arb_id, combo.kind, combo.net_credit,
-                            combo.notional, len(combo.legs),
-                        )
+                    cum_arb_fills += 1
+                    log.info(
+                        "ARB EXECUTED %s [%s] credit=%.4f notional=%.2f legs=%d",
+                        combo.arb_id, combo.kind, combo.net_credit,
+                        combo.notional, len(combo.legs),
+                    )
 
             # ---- Heartbeat (cumulative over window) ----
             if (now_mono - last_heartbeat) > HEARTBEAT_SECS:

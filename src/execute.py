@@ -13,15 +13,40 @@ Paper vs live is controlled by the PAPER_TRADE env var and the
 
 import asyncio
 import logging
+import random
 import time
 import aiosqlite
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 
 from .signal import Signal, Side
 
 log = logging.getLogger(__name__)
 
 DB_PATH = "fills.db"
+
+
+@dataclass
+class OrderLifecycle:
+    """Tracks resting maker orders so GTD/GTC orders can be expired/cancelled.
+
+    Pure bookkeeping (no I/O): the Executor registers a maker order with its
+    expiry and calls `due()` to find ones to cancel. Live mode then issues the
+    cancel; paper mode just drops them. Keeps order management out of the hot
+    path and unit-testable."""
+    _open: dict[str, tuple[str, float]] = field(default_factory=dict)  # id → (token, expiry_ts)
+
+    def register(self, order_id: str, token_id: str, expiry_ts: float) -> None:
+        if order_id:
+            self._open[order_id] = (token_id, expiry_ts)
+
+    def due(self, now: float) -> list[str]:
+        return [oid for oid, (_t, exp) in self._open.items() if exp <= now]
+
+    def drop(self, order_id: str) -> None:
+        self._open.pop(order_id, None)
+
+    def open_count(self) -> int:
+        return len(self._open)
 
 
 @dataclass
@@ -56,8 +81,18 @@ FILL_COLUMNS = [
 
 
 class Executor:
-    def __init__(self, paper: bool = True):
+    def __init__(
+        self,
+        paper: bool = True,
+        maker_fill_prob: float = 1.0,
+        maker_gtd_secs: float = 12.0,
+        seed: int | None = None,
+    ):
         self.paper = paper
+        self.maker_fill_prob = maker_fill_prob   # paper-mode realism for resting orders
+        self.maker_gtd_secs = maker_gtd_secs
+        self._fill_rng = random.Random(seed)
+        self.lifecycle = OrderLifecycle()
         self._clob = None
         self._db: aiosqlite.Connection | None = None
         self._position: dict[str, float] = {}  # token_id → net shares
@@ -122,6 +157,14 @@ class Executor:
             fee = taker_fee_per_share(signal.price, fee_rate) * signal.size
         order_id = ""
 
+        # Paper-mode maker realism: a resting post-only order is only sometimes
+        # hit. Skipping the fill models the order resting unfilled (the caller
+        # may retry next tick). Live fills are decided by the exchange, not here.
+        if self.paper and getattr(signal, "is_maker", False) and self.maker_fill_prob < 1.0:
+            if self._fill_rng.random() > self.maker_fill_prob:
+                log.debug("[PAPER] maker order rested unfilled (p=%.2f)", self.maker_fill_prob)
+                return None
+
         if self.paper:
             order_id = f"paper-{int(time.time()*1000)}"
             log.info(
@@ -157,7 +200,52 @@ class Executor:
         )
         await self._record(fill)
         self._update_position(fill)
+        if not self.paper and fill.is_maker and order_id:
+            self.lifecycle.register(order_id, fill.token_id, time.time() + self.maker_gtd_secs)
         return fill
+
+    async def execute_atomic(self, signals: list[Signal]) -> list[Fill] | None:
+        """Execute a multi-leg combo as a unit; on a failed leg, flatten the
+        already-filled legs (orphan protection) and return None.
+
+        Paper mode fills every leg; live mode can partially fill, so the flatten
+        path matters there. Returns the list of fills on success."""
+        done: list[tuple[Signal, Fill]] = []
+        for s in signals:
+            f = await self.execute(s)
+            if f is None:
+                if done:
+                    log.warning("Combo leg failed after %d fills — flattening orphans.", len(done))
+                    await self._flatten(done)
+                return None
+            done.append((s, f))
+        return [f for _, f in done]
+
+    async def _flatten(self, done: list[tuple[Signal, Fill]]) -> None:
+        for s, _f in done:
+            opp = replace(
+                s,
+                side=Side.SELL if s.side == Side.BUY else Side.BUY,
+                is_maker=False, source="flatten",
+            )
+            try:
+                await self.execute(opp)
+            except Exception as exc:
+                log.error("Flatten leg failed: %s", exc)
+
+    async def expire_maker_orders(self, now: float | None = None) -> int:
+        """Cancel resting maker orders past their GTD. Returns count cancelled."""
+        now = now if now is not None else time.time()
+        due = self.lifecycle.due(now)
+        for oid in due:
+            if not self.paper and self._clob is not None:
+                try:
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(None, lambda o=oid: self._clob.cancel(o))
+                except Exception as exc:
+                    log.debug("Cancel %s failed: %s", oid, exc)
+            self.lifecycle.drop(oid)
+        return len(due)
 
     async def _send_live(self, signal: Signal) -> str:
         if not self._clob:

@@ -101,6 +101,7 @@ class Settings:
     maker_rebate_rate: float = 0.0
     maker_join_ticks: int = 0         # how many ticks inside the spread to post
     maker_gtd_secs: float = 0.0
+    maker_fill_prob: float = 1.0      # paper-mode: P(resting maker order is hit)
 
     # ---- cross-venue arb (Polymarket <-> Kalshi) ----
     xvenue_enabled: bool = False      # off by default — needs Kalshi creds for live
@@ -165,6 +166,7 @@ class Settings:
             maker_rebate_rate=_f("MAKER_REBATE_RATE", 0.0125),
             maker_join_ticks=_i("MAKER_JOIN_TICKS", 1),
             maker_gtd_secs=_f("MAKER_GTD_SECS", 12.0),
+            maker_fill_prob=_f("MAKER_FILL_PROB", 1.0),
 
             xvenue_enabled=_b("XVENUE_ENABLED", False),
             xvenue_min_credit=_f("XVENUE_MIN_CREDIT", 0.01),
