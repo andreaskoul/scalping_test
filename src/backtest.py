@@ -81,7 +81,7 @@ PRICE_RE = re.compile(r"\$?([\d]{1,3}(?:,\d{3})+(?:\.\d+)?|\d{3,}(?:\.\d+)?)")
 @dataclass
 class BacktestConfig:
     days: int = 3
-    max_markets: int = 100
+    max_markets: int = 300         # sampled evenly across the window
     max_notional: float = 25.0
     safety_eps: float | None = None      # None → use the live Config value
     fee_rate: float = FEE_RATE_CRYPTO
@@ -151,6 +151,7 @@ _SERIES_SLUGS = [
 ]
 _GAMMA_PAGE = 100
 _MAX_PAGES = 40          # per series; hourly events ≈ a few days/page
+_FRESH_SKIP_SECS = 3600  # skip markets resolved <1h ago (CLOB history not ready)
 
 
 async def _fetch_resolved_markets(
@@ -419,12 +420,20 @@ async def backtest(cfg: BacktestConfig) -> list[SimFill]:
         log.info("Found %d resolved BTC/ETH threshold markets", len(markets))
         if truncated:
             log.warning(
-                "Coverage TRUNCATED: hit the %d-page budget before reaching the "
-                "%d-day cutoff. Gamma returns all categories newest-first, so the "
-                "realised window is shorter than requested — results reflect only "
-                "the most recent markets.", _MAX_PAGES, cfg.days,
+                "Coverage TRUNCATED: hit the %d-page-per-series budget before "
+                "reaching the %d-day cutoff — realised window is shorter than "
+                "requested.", _MAX_PAGES, cfg.days,
             )
-        markets = markets[: cfg.max_markets]
+        # The very newest markets (last ~hour) often have no CLOB price history
+        # yet — drop them so they don't masquerade as "no edge".
+        fresh_cutoff = time.time() - _FRESH_SKIP_SECS
+        markets = [m for m in markets if _parse_iso(m.get("endDate")) <= fresh_cutoff]
+        # Sample evenly across the whole window rather than taking the freshest
+        # N (which would all cluster in one recent hour and waste the history we
+        # just unlocked).
+        if len(markets) > cfg.max_markets:
+            step = len(markets) / cfg.max_markets
+            markets = [markets[int(i * step)] for i in range(cfg.max_markets)]
         diag["markets_seen"] = len(markets)
 
         for i, m in enumerate(markets):
@@ -734,7 +743,8 @@ def _summarize(fills: list[SimFill]) -> None:
 def cli() -> None:
     parser = argparse.ArgumentParser(description="Backtest the arb signal on resolved markets")
     parser.add_argument("--days", type=int, default=3, help="lookback window")
-    parser.add_argument("--max-markets", type=int, default=100)
+    parser.add_argument("--max-markets", type=int, default=300,
+                        help="markets to simulate, sampled evenly across the window")
     parser.add_argument("--max-notional", type=float, default=25.0)
     parser.add_argument("--safety-eps", type=float, default=None,
                         help="override edge cushion (default: live Config value)")
