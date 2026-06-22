@@ -37,9 +37,13 @@ import asyncio
 import json
 import logging
 import math
+import os
 import random
 import re
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -67,6 +71,16 @@ GAMMA_API = "https://gamma-api.polymarket.com/markets"
 CLOB_HISTORY = "https://clob.polymarket.com/prices-history"
 BINANCE_KLINES = "https://api.binance.com/api/v3/klines"
 BINANCE_AGGTRADES = "https://api.binance.com/api/v3/aggTrades"
+
+# Market workers can run in parallel, but each upstream gets its own polite
+# gate. Polymarket documents /prices-history at 1,000 req / 10s; use 80% of
+# that ceiling so a deployed backtest has room for jitter and other clients.
+CLOB_CONCURRENCY = 20
+CLOB_MIN_INTERVAL_SECS = 0.0125
+BINANCE_CONCURRENCY = 3
+BINANCE_MIN_INTERVAL_SECS = 0.08
+HTTP_RETRIES = 4
+CLOB_USER_AGENT = "scalping-test-backtest/0.1 (+polite-rate-limited)"
 
 THRESHOLD_RE = re.compile(
     r"(?:bitcoin|btc|ethereum|eth)\s+(?:above|reach(?:es)?|over|>=?)", re.I
@@ -115,6 +129,22 @@ class SimFill:
     pnl: float
     is_maker: bool = False
     expiry_ts: float = 0.0  # market resolution time — for correlation grouping
+
+
+class RateGate:
+    def __init__(self, concurrency: int, min_interval_secs: float):
+        self.sem = asyncio.Semaphore(concurrency)
+        self.min_interval_secs = min_interval_secs
+        self.lock = asyncio.Lock()
+        self.next_at = 0.0
+
+    async def wait_turn(self) -> None:
+        async with self.lock:
+            now = time.monotonic()
+            delay = self.next_at - now
+            if delay > 0:
+                await asyncio.sleep(delay)
+            self.next_at = time.monotonic() + self.min_interval_secs
 
 
 def _parse_strike(question: str) -> float:
@@ -211,31 +241,32 @@ async def _fetch_resolved_markets(
 
 
 async def _fetch_token_history(
-    session: aiohttp.ClientSession, token_id: str, start_ts: float, end_ts: float
-) -> list[tuple[float, float]]:
-    """Return [(unix_ts, price), ...] for a token over the window."""
+    session: aiohttp.ClientSession,
+    gate: RateGate,
+    token_id: str,
+    start_ts: float,
+    end_ts: float,
+) -> list[tuple[float, float]] | None:
+    """Return price history, [] if truly empty, None if fetch failed."""
     params = {
         "market": token_id,
         "startTs": int(start_ts),
         "endTs": int(end_ts),
         "fidelity": "1",   # 1-minute buckets
     }
-    try:
-        async with session.get(
-            CLOB_HISTORY, params=params,
-            timeout=aiohttp.ClientTimeout(total=15),
-        ) as r:
-            if r.status != 200:
-                return []
-            d = await r.json()
-            return [(float(p["t"]), float(p["p"])) for p in d.get("history", [])]
-    except Exception as exc:
-        log.debug("History fetch failed for %s: %s", token_id[:12], exc)
-        return []
+    d = await _get_json_urllib(gate, CLOB_HISTORY, params, timeout_secs=15)
+    if d is None:
+        log.debug("History fetch failed for %s", token_id[:12])
+        return None
+    return [(float(p["t"]), float(p["p"])) for p in d.get("history", [])]
 
 
 async def _fetch_binance_klines(
-    session: aiohttp.ClientSession, symbol: str, start_ts: float, end_ts: float
+    session: aiohttp.ClientSession,
+    gate: RateGate,
+    symbol: str,
+    start_ts: float,
+    end_ts: float,
 ) -> list[tuple[float, float]]:
     """Return [(unix_ts, close_price), ...] from Binance 1-minute klines."""
     out: list[tuple[float, float]] = []
@@ -249,15 +280,8 @@ async def _fetch_binance_klines(
             "endTime": end_ms,
             "limit": 1000,
         }
-        try:
-            async with session.get(
-                BINANCE_KLINES, params=params,
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as r:
-                if r.status != 200:
-                    return out
-                rows = await r.json()
-        except Exception:
+        rows = await _get_json(session, gate, BINANCE_KLINES, params, timeout_secs=10)
+        if rows is None:
             return out
         if not rows:
             break
@@ -272,7 +296,11 @@ async def _fetch_binance_klines(
 
 
 async def _fetch_agg_trades(
-    session: aiohttp.ClientSession, symbol: str, start_ts: float, end_ts: float
+    session: aiohttp.ClientSession,
+    gate: RateGate,
+    symbol: str,
+    start_ts: float,
+    end_ts: float,
 ) -> list[tuple[float, float, float, float]]:
     """Return [(ts, price, signed_dollar_vol, abs_dollar_vol), ...].
 
@@ -289,15 +317,8 @@ async def _fetch_agg_trades(
         sub = cur
         while sub < chunk_end:
             params = {"symbol": symbol.upper(), "startTime": sub, "endTime": chunk_end, "limit": 1000}
-            try:
-                async with session.get(
-                    BINANCE_AGGTRADES, params=params,
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as r:
-                    if r.status != 200:
-                        return out
-                    rows = await r.json()
-            except Exception:
+            rows = await _get_json(session, gate, BINANCE_AGGTRADES, params, timeout_secs=10)
+            if rows is None:
                 return out
             if not rows:
                 break
@@ -316,6 +337,91 @@ async def _fetch_agg_trades(
             sub = rows[-1]["T"] + 1
         cur = chunk_end
     return out
+
+
+async def _get_json(
+    session: aiohttp.ClientSession,
+    gate: RateGate,
+    url: str,
+    params: dict,
+    timeout_secs: float,
+):
+    delay = 0.0
+    for attempt in range(HTTP_RETRIES):
+        async with gate.sem:
+            await gate.wait_turn()
+            try:
+                async with session.get(
+                    url, params=params,
+                    timeout=aiohttp.ClientTimeout(total=timeout_secs),
+                ) as r:
+                    if r.status == 200:
+                        return await r.json(content_type=None)
+                    if r.status in (429, 500, 502, 503, 504):
+                        delay = _retry_delay(attempt, r.headers.get("Retry-After"))
+                        log.debug("HTTP %s from %s; retrying in %.2fs", r.status, url, delay)
+                    else:
+                        log.debug("HTTP %s from %s", r.status, url)
+                        return None
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                delay = _retry_delay(attempt, None)
+                log.debug("HTTP fetch failed from %s: %s; retrying in %.2fs", url, exc, delay)
+        await asyncio.sleep(delay)
+    return None
+
+
+async def _get_json_urllib(
+    gate: RateGate,
+    url: str,
+    params: dict,
+    timeout_secs: float,
+):
+    delay = 0.0
+    for attempt in range(HTTP_RETRIES):
+        async with gate.sem:
+            await gate.wait_turn()
+            data, retry_after, retryable = await asyncio.to_thread(
+                _get_json_urllib_once, url, params, timeout_secs,
+            )
+            if data is not None:
+                return data
+            if not retryable:
+                return None
+            delay = _retry_delay(attempt, retry_after)
+        await asyncio.sleep(delay)
+    return None
+
+
+def _get_json_urllib_once(url: str, params: dict, timeout_secs: float):
+    full_url = f"{url}?{urllib.parse.urlencode(params)}"
+    req = urllib.request.Request(
+        full_url,
+        headers={"User-Agent": CLOB_USER_AGENT, "Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_secs) as resp:
+            body = resp.read().decode("utf-8")
+            return json.loads(body), None, False
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+        retry_after = exc.headers.get("Retry-After")
+        if status in (429, 500, 502, 503, 504):
+            log.debug("HTTP %s from %s; retrying", status, url)
+            return None, retry_after, True
+        log.debug("HTTP %s from %s", status, url)
+        return None, None, False
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        log.debug("HTTP fetch failed from %s: %s; retrying", url, exc)
+        return None, None, True
+
+
+def _retry_delay(attempt: int, retry_after: str | None) -> float:
+    if retry_after:
+        try:
+            return min(30.0, max(0.5, float(retry_after)))
+        except ValueError:
+            pass
+    return min(8.0, 0.5 * (2 ** attempt))
 
 
 def _rolling_sigma(closes: list[tuple[float, float]], lookback_secs: float) -> dict[float, float]:
@@ -411,8 +517,15 @@ async def backtest(cfg: BacktestConfig) -> list[SimFill]:
             momentum_near_expiry_secs=lc.momentum_window_secs,
         )
     sig_gen = _build_signal_generator(cfg, micro_engine)
-    fill_rng = random.Random(0)
     headers = {"User-Agent": "Mozilla/5.0"}
+    worker_count = _available_worker_count()
+    sem = asyncio.Semaphore(worker_count)
+    clob_gate = RateGate(CLOB_CONCURRENCY, CLOB_MIN_INTERVAL_SECS)
+    binance_gate = RateGate(BINANCE_CONCURRENCY, BINANCE_MIN_INTERVAL_SECS)
+    klines_cache: dict[tuple[str, int, int], asyncio.Task[list[tuple[float, float]]]] = {}
+    trades_cache: dict[tuple[str, int, int], asyncio.Task[list[tuple[float, float, float, float]]]] = {}
+    sigma_cache: dict[tuple[str, int, int], dict[float, float]] = {}
+    replay_cache: dict[tuple[str, int, int], MicroReplay | None] = {}
     async with aiohttp.ClientSession(headers=headers) as session:
         log.info("Fetching resolved markets from last %d day(s)...", cfg.days)
         markets, truncated = await _fetch_resolved_markets(session, cfg.days)
@@ -424,10 +537,74 @@ async def backtest(cfg: BacktestConfig) -> list[SimFill]:
                 "realised window is shorter than requested — results reflect only "
                 "the most recent markets.", _MAX_PAGES, cfg.days,
             )
-        markets = markets[: cfg.max_markets]
+        markets = _select_markets(markets, cfg.max_markets)
+        if markets:
+            first = datetime.fromtimestamp(_parse_iso(markets[0].get("endDate")), timezone.utc)
+            last = datetime.fromtimestamp(_parse_iso(markets[-1].get("endDate")), timezone.utc)
+            log.info(
+                "Selected %d markets spread across %s → %s; workers=%d, clob=%dx/%.2fs, binance=%dx/%.2fs",
+                len(markets), first.strftime("%Y-%m-%d %H:%M UTC"),
+                last.strftime("%Y-%m-%d %H:%M UTC"), worker_count,
+                CLOB_CONCURRENCY, CLOB_MIN_INTERVAL_SECS,
+                BINANCE_CONCURRENCY, BINANCE_MIN_INTERVAL_SECS,
+            )
         diag["markets_seen"] = len(markets)
 
-        for i, m in enumerate(markets):
+        async def cached_klines(symbol: str, start_ts: float, expiry: float) -> list[tuple[float, float]]:
+            key = (symbol, int(start_ts), int(expiry))
+            task = klines_cache.get(key)
+            if task is None:
+                task = asyncio.create_task(_fetch_binance_klines(session, binance_gate, symbol, start_ts, expiry))
+                klines_cache[key] = task
+            return await task
+
+        async def cached_replay(symbol: str, start_ts: float, expiry: float) -> MicroReplay | None:
+            key = (symbol, int(start_ts), int(expiry))
+            if key in replay_cache:
+                return replay_cache[key]
+            task = trades_cache.get(key)
+            if task is None:
+                task = asyncio.create_task(_fetch_agg_trades(session, binance_gate, symbol, start_ts, expiry))
+                trades_cache[key] = task
+            trades = await task
+            replay = MicroReplay(trades) if trades else None
+            replay_cache[key] = replay
+            return replay
+
+        async def process_market(i: int, m: dict) -> list[SimFill]:
+            async with sem:
+                return await _process_market(
+                    i, m, cfg, session, clob_gate, sig_gen, diag, cached_klines,
+                    cached_replay, sigma_cache,
+                )
+
+        tasks = [asyncio.create_task(process_market(i, m)) for i, m in enumerate(markets)]
+        completed = 0
+        for task in asyncio.as_completed(tasks):
+            fills.extend(await task)
+            completed += 1
+            if completed % 10 == 0:
+                log.info("...processed %d/%d markets, %d sim-fills so far",
+                         completed, len(markets), len(fills))
+
+    if cfg.debug or not fills:
+        _print_diag(diag)
+    return fills
+
+
+async def _process_market(
+    i: int,
+    m: dict,
+    cfg: BacktestConfig,
+    session: aiohttp.ClientSession,
+    clob_gate: RateGate,
+    sig_gen: SignalGenerator,
+    diag: Counter,
+    cached_klines,
+    cached_replay,
+    sigma_cache: dict[tuple[str, int, int], dict[float, float]],
+) -> list[SimFill]:
+            out: list[SimFill] = []
             q = m.get("question", "")
             is_threshold = bool(THRESHOLD_RE.search(q))
             strike = _parse_strike(q) if is_threshold else 0.0
@@ -436,20 +613,20 @@ async def backtest(cfg: BacktestConfig) -> list[SimFill]:
             expiry = _parse_iso(m.get("endDate"))
             start_ts = _parse_iso(m.get("startDate")) or (expiry - 4 * 3600)
             if expiry <= 0 or start_ts >= expiry:
-                continue
+                return out
 
             resolution = _resolution(m)
             if resolution is None:
-                continue
+                return out
 
             # Modern shape: clobTokenIds is a JSON-encoded list aligned with outcomes.
             raw_ids = m.get("clobTokenIds")
             if not raw_ids:
-                continue
+                return out
             try:
                 ids = raw_ids if isinstance(raw_ids, list) else json.loads(raw_ids)
             except Exception:
-                continue
+                return out
             outcomes = m.get("outcomes")
             if isinstance(outcomes, str):
                 try:
@@ -462,42 +639,49 @@ async def backtest(cfg: BacktestConfig) -> list[SimFill]:
                     yes_token = str(ids[idx]) if idx < len(ids) else ""
                     break
             if not yes_token:
-                continue
+                return out
 
             is_updown = not is_threshold
             if is_updown and not cfg.trade_updown:
                 diag["mkt_skip_updown"] += 1
-                continue
+                return out
 
-            history = await _fetch_token_history(session, yes_token, start_ts, expiry)
+            history = await _fetch_token_history(session, clob_gate, yes_token, start_ts, expiry)
+            if history is None:
+                diag["mkt_history_fetch_failed"] += 1
+                return out
             if len(history) < 5:
                 diag["mkt_no_history"] += 1
-                continue
-            klines = await _fetch_binance_klines(session, symbol, start_ts, expiry)
+                return out
+            klines = await cached_klines(symbol, start_ts, expiry)
             if len(klines) < 5:
                 diag["mkt_no_klines"] += 1
-                continue
-            sigmas = _rolling_sigma(klines, cfg.sigma_window_secs)
+                return out
+            window_key = (symbol, int(start_ts), int(expiry))
+            sigmas = sigma_cache.get(window_key)
+            if sigmas is None:
+                sigmas = _rolling_sigma(klines, cfg.sigma_window_secs)
+                sigma_cache[window_key] = sigmas
             kline_by_ts = {ts: c for ts, c in klines}
             kline_keys = sorted(kline_by_ts)
 
             replay = None
             if cfg.ofi_replay:
-                trades = await _fetch_agg_trades(session, symbol, start_ts, expiry)
-                if trades:
-                    replay = MicroReplay(trades)
+                replay = await cached_replay(symbol, start_ts, expiry)
+                if replay is not None:
                     diag["mkt_with_tape"] += 1
 
             # For Up/Down markets the strike is the Binance close at start_ts.
             if is_updown:
                 idx = _bisect_le(kline_keys, start_ts)
                 if idx < 0:
-                    continue
+                    return out
                 strike = kline_by_ts[kline_keys[idx]]
 
             diag["mkt_evaluable"] += 1
             mkt_max_raw = 0.0     # best gross edge (no eps/wedge) seen this market
             mkt_fired = False
+            fill_rng = random.Random(yes_token)
             for poly_ts, poly_price in history:
                 if poly_price <= 0 or poly_price >= 1:
                     continue
@@ -585,7 +769,7 @@ async def backtest(cfg: BacktestConfig) -> list[SimFill]:
                 else:
                     pnl = (sig.price - resolution) * size - cost * size
 
-                fills.append(SimFill(
+                out.append(SimFill(
                     market_question=q,
                     symbol=sym_lower,
                     ts=poly_ts,
@@ -613,19 +797,15 @@ async def backtest(cfg: BacktestConfig) -> list[SimFill]:
                 # A gross edge existed but the live haircuts/gates rejected it.
                 diag["mkt_edge_eaten"] += 1
 
-            if (i + 1) % 10 == 0:
-                log.info("...processed %d/%d markets, %d sim-fills so far",
-                         i + 1, len(markets), len(fills))
-
-    if cfg.debug or not fills:
-        _print_diag(diag)
-    return fills
+            return out
 
 
 def _print_diag(diag: "Counter") -> None:
     print("\n--- Diagnostics (where candidates were dropped) ---")
     print(f"  markets seen:            {diag['markets_seen']}")
     print(f"    skipped Up/Down:       {diag['mkt_skip_updown']}")
+    print(f"    history fetch failed:  {diag['mkt_history_fetch_failed']}  "
+          f"(rate-limit/network; retried)")
     print(f"    no Polymarket history: {diag['mkt_no_history']}")
     print(f"    no Binance klines:     {diag['mkt_no_klines']}  "
           f"(HTTP 451 if geo-blocked)")
@@ -643,6 +823,46 @@ def _print_diag(diag: "Counter") -> None:
                   " gates removed it (this is the realistic correction).")
         else:
             print("  → Verdict: no gross edge in the window even before costs.")
+
+
+def _available_worker_count(reserve: int = 2) -> int:
+    """Workers from CPU actually available/headroom, reserving cores for the OS.
+
+    Linux exposes process affinity; macOS does not, so there we estimate idle
+    headroom with 1-minute load average instead of blindly using core count.
+    """
+    affinity = getattr(os, "sched_getaffinity", None)
+    if affinity is not None:
+        try:
+            available = len(affinity(0))
+            return max(1, available - reserve)
+        except OSError:
+            pass
+
+    total = os.cpu_count() or 1
+    try:
+        load_1m = os.getloadavg()[0]
+    except OSError:
+        load_1m = 0.0
+    available = max(1, math.floor(total - load_1m))
+    return max(1, available - reserve)
+
+
+def _select_markets(markets: list[dict], max_markets: int) -> list[dict]:
+    """Deterministically spread capped runs across the full lookback window."""
+    ordered = sorted(markets, key=lambda m: _parse_iso(m.get("endDate")))
+    if max_markets <= 0 or len(ordered) <= max_markets:
+        return ordered
+
+    last = len(ordered) - 1
+    chosen = []
+    seen: set[int] = set()
+    for i in range(max_markets):
+        idx = round(i * last / (max_markets - 1))
+        if idx not in seen:
+            chosen.append(ordered[idx])
+            seen.add(idx)
+    return chosen
 
 
 def _bisect_le(sorted_list: list[float], target: float) -> int:

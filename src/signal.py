@@ -265,7 +265,7 @@ class SignalGenerator:
             return None
         self._last_fire[best.token_id] = now
 
-        log.info(
+        log.debug(
             "Signal %s %s %s token=%s px=%.4f p*=%.4f p_fair=%.4f edge=%.4f σ=%.3f size=%.1f",
             "MAKER" if best.is_maker else "TAKER", best.side.value,
             market.question[:48], best.token_id[:12],

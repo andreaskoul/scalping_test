@@ -13,6 +13,7 @@ Paper vs live is controlled by the PAPER_TRADE env var and the
 
 import asyncio
 import logging
+import os
 import random
 import time
 import aiosqlite
@@ -22,7 +23,7 @@ from .signal import Signal, Side
 
 log = logging.getLogger(__name__)
 
-DB_PATH = "fills.db"
+DB_PATH = os.getenv("FILL_DB_PATH", "fills.db")
 
 
 @dataclass
