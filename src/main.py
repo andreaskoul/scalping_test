@@ -29,6 +29,7 @@ import asyncio
 import logging
 import os
 import time
+import uuid
 
 from dotenv import load_dotenv
 
@@ -53,6 +54,7 @@ from .resolution import PriceToBeatCache, ChainlinkBasis
 from .risk import RiskManager
 from .signal import Side, Signal, SignalGenerator
 from .sizing import kelly_size
+from .telemetry import DecisionTrace, Recorder
 
 log = logging.getLogger(__name__)
 
@@ -162,6 +164,7 @@ async def _xvenue_loop(
 
 async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0) -> None:
     _setup_logging(log_level)
+    run_id = os.getenv("RUN_ID", f"run-{int(time.time())}-{uuid.uuid4().hex[:8]}")
 
     private_key = os.getenv("POLY_PRIVATE_KEY")
     if not paper and not private_key:
@@ -196,9 +199,14 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
     )
     if duration_secs > 0:
         log.info("Will stop after %.0f seconds and print PnL summary.", duration_secs)
+    recorder = Recorder.from_env()
+    if recorder is not None:
+        await recorder.start()
+        log.info("Decision telemetry enabled: db=%s run_id=%s", recorder.db_path, run_id)
 
     binance_clients = {sym: BinanceWS(sym, stale_threshold_secs=binance_stale) for sym in symbols}
-    poly_ws = PolyWS(token_ids=[], stale_threshold_secs=poly_stale)
+    event_sink = recorder.record_poly_event if recorder is not None else None
+    poly_ws = PolyWS(token_ids=[], stale_threshold_secs=poly_stale, event_sink=event_sink)
     iv_oracle = DeribitIV(symbols=symbols)
     effective_spread_mult = float(os.getenv("EFFECTIVE_SPREAD_MULT", "1.3"))
     max_walk_slippage = float(os.getenv("MAX_WALK_SLIPPAGE", "0.05"))
@@ -388,6 +396,11 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
                 tick = bc.snapshot()
                 if tick is None:
                     cum_no_spot += 1
+                    if recorder is not None:
+                        trace = DecisionTrace.new(run_id, stage="universe")
+                        _populate_market_trace(trace, market, now_wall)
+                        trace.mark_reject("NO_SPOT")
+                        recorder.record(trace)
                     continue
 
                 # Price against the settlement feed: shift Binance spot by the
@@ -413,10 +426,26 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
                 yes_book = poly_ws.snapshot(market.yes_token_id)
                 if yes_book is None:
                     cum_no_book += 1
+                    if recorder is not None:
+                        trace = DecisionTrace.new(run_id, stage="universe")
+                        _populate_market_trace(trace, market, now_wall)
+                        trace.spot_bid = tick.bid
+                        trace.spot_ask = tick.ask
+                        trace.spot_mid = tick.mid
+                        trace.sigma = tick.sigma_annual
+                        trace.drift = getattr(tick, "drift_annual", 0.0)
+                        trace.mark_reject("NO_BOOK")
+                        recorder.record(trace)
                     continue
 
                 if tick.sigma_annual <= SIGMA_MIN:
                     cum_warmup += 1
+                    if recorder is not None:
+                        trace = DecisionTrace.new(run_id, stage="universe")
+                        _populate_market_trace(trace, market, now_wall)
+                        _populate_tick_book_trace(trace, tick, yes_book, now_mono)
+                        trace.mark_reject("WARMUP")
+                        recorder.record(trace)
                     continue
 
                 cum_eval += 1
@@ -432,6 +461,12 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
                     market.question, market.symbol, tte, proxy_px,
                 )
                 if cat_key in blacklist:
+                    if recorder is not None:
+                        trace = DecisionTrace.new(run_id, stage="eval")
+                        _populate_market_trace(trace, market, now_wall)
+                        _populate_tick_book_trace(trace, tick, yes_book, now_mono)
+                        trace.mark_reject("BLACKLISTED")
+                        recorder.record(trace)
                     continue
 
                 # Microstructure features + perp-funding carry for this market.
@@ -449,8 +484,9 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
                     carry += funding_oracle.carry(market.symbol)
                 carry += funding_oracle.fade_drift(market.symbol)
 
+                trace = DecisionTrace.new(run_id, stage="eval") if recorder is not None else None
                 signal = signal_gen.evaluate(
-                    market, tick, yes_book, features=feats, carry_annual=carry,
+                    market, tick, yes_book, features=feats, carry_annual=carry, trace=trace,
                 )
 
                 # Mean-reversion overlay (Portnaya 4h half-life). Fed every tick
@@ -497,6 +533,8 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
                             raw = abs(p - proxy_px)
                             if raw > top_edge_seen[0]:
                                 top_edge_seen = (raw, market.question)
+                    if recorder is not None and trace is not None:
+                        recorder.record(trace)
                     continue
 
                 cum_signals += 1
@@ -506,14 +544,30 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
                     market.question, market.symbol, tte, signal.price,
                 )
                 if cat_key in blacklist:
+                    if recorder is not None and trace is not None:
+                        trace.stage = "risk"
+                        trace.mark_reject("BLACKLISTED")
+                        recorder.record(trace)
                     continue
 
                 allowed, reason = risk.check(signal, binance_ts=tick.ts, poly_ts=yes_book.ts)
                 if not allowed:
                     log.debug("Risk blocked: %s", reason)
+                    if recorder is not None and trace is not None:
+                        trace.stage = "risk"
+                        trace.mark_reject(f"RISK_BLOCKED:{reason}")
+                        recorder.record(trace)
                     continue
 
                 fill = await executor.execute(signal)
+                if recorder is not None and trace is not None:
+                    trace.stage = "exec"
+                    if fill:
+                        trace.signal = 1
+                        trace.reject_reason = ""
+                    else:
+                        trace.mark_reject("EXEC_UNFILLED")
+                    recorder.record(trace)
                 if fill:
                     cum_fills += 1
                     risk.record_fill(fill.price * fill.size)
@@ -601,6 +655,12 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
         await asyncio.gather(*tasks, return_exceptions=True)
         await session.close()
         await executor.close()
+        if recorder is not None:
+            await recorder.close()
+            if recorder.dropped:
+                log.warning("Decision telemetry dropped %d rows", recorder.dropped)
+            if recorder.poly_dropped:
+                log.warning("Polymarket event telemetry dropped %d rows", recorder.poly_dropped)
 
         # Reconcile category tracker against newly-resolved markets so the
         # next run inherits what this run learned.
@@ -615,6 +675,31 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
                 category_tracker.save()
             except Exception:
                 pass
+
+
+def _populate_market_trace(trace: DecisionTrace, market, now_wall: float) -> None:
+    trace.market_id = market.condition_id
+    trace.question = market.question
+    trace.token_id = market.yes_token_id
+    trace.symbol = market.symbol
+    trace.strike = market.strike
+    trace.expiry_ts = market.expiry_ts
+    trace.tte = market.expiry_ts - now_wall
+    trace.is_updown = int(market.is_updown)
+    trace.is_threshold = int(market.is_threshold)
+
+
+def _populate_tick_book_trace(trace: DecisionTrace, tick, book, now_mono: float) -> None:
+    trace.spot_bid = tick.bid
+    trace.spot_ask = tick.ask
+    trace.spot_mid = tick.mid
+    trace.sigma = tick.sigma_annual
+    trace.drift = getattr(tick, "drift_annual", 0.0)
+    trace.poly_bid = book.best_bid
+    trace.poly_ask = book.best_ask
+    trace.poly_bid_sz = book.bid_size
+    trace.poly_ask_sz = book.ask_size
+    trace.book_age = now_mono - book.ts
 
 
 def cli() -> None:

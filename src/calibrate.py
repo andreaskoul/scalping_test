@@ -32,6 +32,7 @@ import numpy as np
 
 from .pnl import _fetch_resolution
 from .pnl_attribution import _load_fills
+from .storage import default_db_path
 
 
 async def _resolved_samples(db_path: str) -> list[dict]:
@@ -102,7 +103,7 @@ def _write(obj: dict, path: str) -> None:
     os.replace(tmp, path)
 
 
-async def calibrate(db_path: str = "fills.db") -> None:
+async def calibrate(db_path: str = default_db_path("fills.db")) -> None:
     samples = await _resolved_samples(db_path)
     print(f"Resolved model fills: {len(samples)}")
     if not samples:
@@ -129,7 +130,7 @@ async def calibrate(db_path: str = "fills.db") -> None:
 
 def cli() -> None:
     ap = argparse.ArgumentParser(description="Fit wedge + calibration from resolved fills")
-    ap.add_argument("--db", default="fills.db")
+    ap.add_argument("--db", default=default_db_path("fills.db"))
     args = ap.parse_args()
     asyncio.run(calibrate(args.db))
 

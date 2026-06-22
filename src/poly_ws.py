@@ -115,6 +115,8 @@ class PolyWS:
         api_secret: str | None = None,
         api_passphrase: str | None = None,
         stale_threshold_secs: float = 5.0,
+        event_sink=None,
+        snapshot_interval_secs: float = 10.0,
     ):
         self._token_ids: set[str] = set(token_ids)
         self._stale = stale_threshold_secs
@@ -129,6 +131,9 @@ class PolyWS:
         # single largest CPU hot spot.
         self._books: dict[str, dict] = {}
         self._fill_callbacks: list = []
+        self._event_sink = event_sink
+        self._snapshot_interval = max(0.0, snapshot_interval_secs)
+        self._last_event_snapshot: dict[str, float] = {}
         self._ws = None
         self._subscribed: set[str] = set()
         self._sub_lock = asyncio.Lock()
@@ -281,6 +286,35 @@ class PolyWS:
         if not self._book_change.is_set():
             self._book_change.set()
 
+    def _emit_event(self, token_id: str, etype: str, book: dict, now_mono: float, force_levels: bool = False) -> None:
+        if self._event_sink is None:
+            return
+        include_levels = force_levels
+        if self._snapshot_interval > 0:
+            last = self._last_event_snapshot.get(token_id, 0.0)
+            if now_mono - last >= self._snapshot_interval:
+                include_levels = True
+                self._last_event_snapshot[token_id] = now_mono
+        event = {
+            "ts_mono": now_mono,
+            "ts_wall": time.time(),
+            "token_id": token_id,
+            "etype": etype,
+            "best_bid": book["best_bid"],
+            "best_ask": book["best_ask"],
+            "bid_sz": book["best_bid_size"],
+            "ask_sz": book["best_ask_size"],
+        }
+        if include_levels:
+            event["levels"] = {
+                "bids": [[p, s] for p, s in sorted(book["bids"].items(), reverse=True)],
+                "asks": [[p, s] for p, s in sorted(book["asks"].items())],
+            }
+        try:
+            self._event_sink(event)
+        except Exception as exc:
+            log.debug("Poly event sink failed: %s", exc)
+
     async def _subscriber_loop(self) -> None:
         """Send subscribe messages whenever the tracked set grows."""
         while True:
@@ -333,6 +367,7 @@ class PolyWS:
                 book["ts"] = now
                 if _refresh_top(book):
                     self._mark_dirty(tid)
+                    self._emit_event(tid, "book", book, now, force_levels=True)
             elif etype == "price_change":
                 for ch in ev.get("changes") or []:
                     try:
@@ -349,6 +384,7 @@ class PolyWS:
                 book["ts"] = now
                 if _refresh_top(book):
                     self._mark_dirty(tid)
+                    self._emit_event(tid, "price_change", book, now)
             elif etype == "tick_size_change":
                 book["ts"] = now
 

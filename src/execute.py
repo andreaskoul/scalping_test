@@ -13,17 +13,17 @@ Paper vs live is controlled by the PAPER_TRADE env var and the
 
 import asyncio
 import logging
-import os
 import random
 import time
 import aiosqlite
 from dataclasses import dataclass, field, replace
 
 from .signal import Signal, Side
+from .storage import ensure_parent, env_db_path
 
 log = logging.getLogger(__name__)
 
-DB_PATH = os.getenv("FILL_DB_PATH", "fills.db")
+DB_PATH = env_db_path("FILL_DB_PATH", "fills.db")
 
 
 @dataclass
@@ -100,6 +100,7 @@ class Executor:
         self._realised_pnl: float = 0.0
 
     async def setup(self, private_key: str | None = None) -> None:
+        ensure_parent(DB_PATH)
         self._db = await aiosqlite.connect(DB_PATH)
         await self._db.execute(
             """CREATE TABLE IF NOT EXISTS fills (

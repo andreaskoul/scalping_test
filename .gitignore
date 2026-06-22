@@ -1,5 +1,6 @@
 .env
 *.db
+*.db-*
 category_state.json
 model_weights.json
 wedge_coeffs.json

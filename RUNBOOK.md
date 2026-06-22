@@ -28,6 +28,8 @@ Polymarket bot ecosystem). **The max-EV profile is the default** — running
 
 Validate-first tooling: `python -m src.pnl_attribution` groups realised PnL by
 side × price × p* to confirm the wedge (#1) on your own fills before trusting it.
+SQLite runtime files live in `data/db/` by default; override with `DB_DIR`,
+`FILL_DB_PATH`, or `TELEMETRY_DB_PATH` when you want a named run database.
 
 ---
 

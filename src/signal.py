@@ -50,6 +50,7 @@ from .binance_ws import BinanceTick
 from .poly_ws import BookSnapshot
 from .microstructure import MicroFeatures, order_book_imbalance
 from .sizing import kelly_size
+from .telemetry import DecisionTrace
 
 log = logging.getLogger(__name__)
 
@@ -187,26 +188,62 @@ class SignalGenerator:
         no_book: BookSnapshot | None = None,
         features: MicroFeatures | None = None,
         carry_annual: float = 0.0,
+        trace: DecisionTrace | None = None,
     ) -> Signal | None:
         """Return a Signal if an edge exists, else None."""
         now = time.monotonic()
         time_to_expiry = market.expiry_ts - time.time()
 
+        if trace is not None:
+            trace.market_id = market.condition_id
+            trace.question = market.question
+            trace.token_id = market.yes_token_id
+            trace.symbol = market.symbol
+            trace.strike = market.strike
+            trace.expiry_ts = market.expiry_ts
+            trace.tte = time_to_expiry
+            trace.is_updown = int(market.is_updown)
+            trace.is_threshold = int(market.is_threshold)
+            trace.spot_bid = binance.bid
+            trace.spot_ask = binance.ask
+            trace.spot_mid = binance.mid
+            trace.sigma = binance.sigma_annual
+            trace.carry = carry_annual
+            trace.drift = getattr(binance, "drift_annual", 0.0)
+            trace.ofi = getattr(features, "ofi", 0.0) if features is not None else 0.0
+            trace.poly_bid = yes_book.best_bid
+            trace.poly_ask = yes_book.best_ask
+            trace.poly_bid_sz = yes_book.bid_size
+            trace.poly_ask_sz = yes_book.ask_size
+            trace.book_age = now - yes_book.ts
+
         # tte gates — skip near-expiry (model degeneracy + huge fee/edge ratio)
         # and far-expiry (pre-listed Up/Down or threshold markets we can't price).
         if time_to_expiry < self.min_tte_secs:
+            if trace is not None:
+                trace.mark_reject("TTE_TOO_SHORT")
             return None
         if time_to_expiry > self.max_tte_secs:
+            if trace is not None:
+                trace.mark_reject("TTE_TOO_LONG")
             return None
 
         # Up/Down markets are now tradeable once the strike has been anchored
         # to the real Chainlink Price-to-Beat (see resolution.py + main.py);
         # only skip them if the legacy flag is set AND the strike is unanchored.
         if self.skip_updown and market.is_updown:
+            if trace is not None:
+                trace.mark_reject("UPDOWN_SKIPPED")
             return None
 
         # Skip if strike isn't anchored or spot is missing.
-        if market.strike <= 0 or binance.mid <= 0:
+        if market.strike <= 0:
+            if trace is not None:
+                trace.mark_reject("STRIKE_UNSET")
+            return None
+        if binance.mid <= 0:
+            if trace is not None:
+                trace.mark_reject("SPOT_MISSING")
             return None
 
         # σ blend: max of EWMA realised, options-implied (Deribit), and a
@@ -217,6 +254,8 @@ class SignalGenerator:
         # Require a recent Polymarket print (the book might have moved
         # several ticks since the snapshot was taken).
         if (now - yes_book.ts) > self.book_max_age_secs:
+            if trace is not None:
+                trace.mark_reject("BOOK_STALE")
             return None
 
         # Fair (option-implied) terminal probability with perp-funding carry.
@@ -230,6 +269,8 @@ class SignalGenerator:
         )
         # Self-calibrated recalibration of the pricer (src.calibrate), if loaded.
         p_fair = apply_calibration(p_fair, self.calib)
+        if trace is not None:
+            trace.p_fair = p_fair
 
         obi = order_book_imbalance(yes_book.bid_size, yes_book.ask_size)
 
@@ -246,24 +287,45 @@ class SignalGenerator:
             sens = p_fair * (1.0 - p_fair)
             nudge = max(-self.nudge_cap, min(self.nudge_cap, self.ml_weight * eff_dir * sens))
             p_star = min(0.999, max(0.001, p_fair + nudge))
+        if trace is not None:
+            trace.p_star = p_star
 
         tte_hours = time_to_expiry / 3600.0
 
-        sig_buy = self._check_leg(market, market.yes_token_id, Side.BUY,
-                                  p_star, p_fair, tte_hours, yes_book, sigma_used, obi)
-        sig_sell = self._check_leg(market, market.yes_token_id, Side.SELL,
-                                   p_star, p_fair, tte_hours, yes_book, sigma_used, obi)
+        sig_buy, buy_reason = self._check_leg_with_reason(
+            market, market.yes_token_id, Side.BUY,
+            p_star, p_fair, tte_hours, yes_book, sigma_used, obi, trace,
+        )
+        sig_sell, sell_reason = self._check_leg_with_reason(
+            market, market.yes_token_id, Side.SELL,
+            p_star, p_fair, tte_hours, yes_book, sigma_used, obi, trace,
+        )
 
         candidates = [s for s in (sig_buy, sig_sell) if s is not None]
         if not candidates:
+            if trace is not None:
+                if buy_reason == "OBI_VETO" and sell_reason == "OBI_VETO":
+                    trace.mark_reject("OBI_VETO")
+                elif buy_reason == "PRICE_BAND_BUY" and sell_reason == "PRICE_BAND_SELL":
+                    trace.mark_reject("PRICE_BAND")
+                elif buy_reason == "SIZE_TOO_SMALL" or sell_reason == "SIZE_TOO_SMALL":
+                    trace.mark_reject("SIZE_TOO_SMALL")
+                elif buy_reason == "KELLY_ZERO" or sell_reason == "KELLY_ZERO":
+                    trace.mark_reject("KELLY_ZERO")
+                else:
+                    trace.mark_reject("NO_EDGE")
             return None
         best = max(candidates, key=lambda s: s.edge)
 
         # Per-token cooldown applied once, after picking the better leg.
         last = self._last_fire.get(best.token_id, 0.0)
         if now - last < self.cooldown:
+            if trace is not None:
+                trace.mark_reject("COOLDOWN")
             return None
         self._last_fire[best.token_id] = now
+        if trace is not None:
+            trace.mark_signal(best.side.value, best.is_maker, best.price, best.size)
 
         log.debug(
             "Signal %s %s %s token=%s px=%.4f p*=%.4f p_fair=%.4f edge=%.4f σ=%.3f size=%.1f",
@@ -285,12 +347,30 @@ class SignalGenerator:
         sigma: float,
         obi: float,
     ) -> Signal | None:
+        signal, _reason = self._check_leg_with_reason(
+            market, token_id, side, p_star, p_fair, tte_hours, book, sigma, obi, None,
+        )
+        return signal
+
+    def _check_leg_with_reason(
+        self,
+        market: PolyMarket,
+        token_id: str,
+        side: Side,
+        p_star: float,
+        p_fair: float,
+        tte_hours: float,
+        book: BookSnapshot,
+        sigma: float,
+        obi: float,
+        trace: DecisionTrace | None = None,
+    ) -> tuple[Signal | None, str]:
         # ---- OBI toxicity veto (adverse-selection gate) ----
         if self.obi_veto:
             if side == Side.BUY and obi < self.obi_veto_threshold:
-                return None
+                return None, "OBI_VETO"
             if side == Side.SELL and obi > -self.obi_veto_threshold:
-                return None
+                return None, "OBI_VETO"
 
         if side == Side.BUY:
             top_price, top_size = book.best_ask, book.ask_size
@@ -299,7 +379,7 @@ class SignalGenerator:
             top_price, top_size = book.best_bid, book.bid_size
             price_floor = self.sell_price_min   # re-admit the longshot tail on SELL
         if top_price <= 0 or top_price < price_floor or top_price > self.price_max:
-            return None
+            return None, "PRICE_BAND_BUY" if side == Side.BUY else "PRICE_BAND_SELL"
 
         # ---- Favourite-longshot wedge haircut (Portnaya Table 5; fitted coeffs
         # from src.calibrate when available, else the paper prior) ----
@@ -318,6 +398,8 @@ class SignalGenerator:
         sell_pen = self.longshot_tilt_mult * max(0.0, -wedge)
         quoted_spread = max(0.0, book.best_ask - book.best_bid)
         eff_spread_extra = (self.effective_spread_mult - 1.0) * quoted_spread
+        if trace is not None:
+            trace.wedge = wedge
 
         candidates: list[tuple[float, float, float, bool]] = []  # edge, px, size, is_maker
 
@@ -341,8 +423,12 @@ class SignalGenerator:
             )
             if side == Side.BUY:
                 edge = p_star - exec_price - fee - eff_spread_extra - self.safety_eps - buy_pen
+                if trace is not None:
+                    trace.edge_buy = edge
             else:
                 edge = exec_price - p_star - fee - eff_spread_extra - self.safety_eps - sell_pen
+                if trace is not None:
+                    trace.edge_sell = edge
             candidates.append((edge, exec_price, size, False))
 
         # ---- Maker variant (post inside the spread, earn rebate, no taker fee) ----
@@ -367,23 +453,23 @@ class SignalGenerator:
                     candidates.append((medge, mprice, msize, True))
 
         if not candidates:
-            return None
+            return None, "SIZE_TOO_SMALL"
         edge, exec_price, size, is_maker = max(candidates, key=lambda c: c[0])
         if edge <= 0:
-            return None
+            return None, "NO_EDGE"
 
         # ---- Fractional-Kelly cap on size ----
         if self.kelly_enabled:
             ks = kelly_size(p_star, exec_price, side.value, self.max_notional, self.kelly_fraction)
             if ks <= 0:
-                return None
+                return None, "KELLY_ZERO"
             size = min(size, ks)
         if size < 1.0:
-            return None
+            return None, "SIZE_TOO_SMALL"
 
         return Signal(
             market=market, token_id=token_id, side=side,
             price=exec_price, size=round(size, 2),
             p_star=p_star, edge=edge, sigma=sigma,
             is_maker=is_maker, source="model",
-        )
+        ), ""

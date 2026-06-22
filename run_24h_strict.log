@@ -1,0 +1,102 @@
+12:58:46 INFO     __main__  === Polymarket-vs-Binance arb bot starting [PAPER] ===
+12:58:46 INFO     __main__  Binance symbols: ['btcusdt', 'ethusdt'] | safety_eps=0.0300 cooldown=10.0s notional<=10 | price=[0.10,0.90] σ_floor=0.40 tte=[300,2700]s skip_updown=False
+12:58:46 INFO     __main__  Will stop after 86400 seconds and print PnL summary.
+12:58:46 INFO     __main__  Decision telemetry enabled: db=decisions_strict_v2.db run_id=strict-hybrid-20260622T105845Z
+12:58:46 INFO     __main__  Overlays: longshot_tilt=1.00 maker=on ml=on(0.25) obi_veto=on(-0.60) momentum=on meanrev=on kelly=on(0.30) price_to_beat=on xvenue=off sell_tail>=0.10
+12:58:46 INFO     __main__  Loaded category tracker: 3 known, 0 currently blacklisted
+12:58:46 INFO     src.deribit_iv  Deribit IV poller started (refresh=60s, symbols=['btcusdt', 'ethusdt'])
+12:58:46 INFO     src.funding  Funding poller started (refresh=60s, symbols=['btcusdt', 'ethusdt'])
+12:58:46 INFO     src.poly_ws  Polymarket WS connected: wss://ws-subscriptions-clob.polymarket.com/ws/market
+12:58:46 INFO     src.poly_universe  Universe: 72 tradeable BTC/ETH markets (1 page(s), 72 BTC/ETH seen)
+12:58:46 INFO     __main__  Universe refreshed: 72 markets
+12:58:47 INFO     src.binance_ws  Binance WS connected: wss://stream.binance.com:443/stream?streams=ethusdt@bookTicker/ethusdt@aggTrade
+12:58:47 INFO     src.binance_ws  Binance WS connected: wss://stream.binance.com:443/stream?streams=btcusdt@bookTicker/btcusdt@aggTrade
+12:59:16 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=144 no-book=15777 warmup=1326 markets=72 btcusdt[σ=0.050 iv=0.322 μ=+0.022] ethusdt[σ=0.050 iv=0.482 μ=+0.118] top-raw-gap=-1.000 ()
+12:59:16 INFO     src.poly_universe  Universe: 36 tradeable BTC/ETH markets (1 page(s), 72 BTC/ETH seen)
+12:59:16 INFO     __main__  Universe refreshed: 36 markets
+12:59:46 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=9992 warmup=0 markets=36 btcusdt[σ=0.050 iv=0.322 μ=-0.143] ethusdt[σ=0.050 iv=0.482 μ=-0.105] top-raw-gap=-1.000 ()
+12:59:46 INFO     src.poly_universe  Universe: 36 tradeable BTC/ETH markets (1 page(s), 72 BTC/ETH seen)
+12:59:46 INFO     __main__  Universe refreshed: 36 markets
+13:00:16 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=16 no-book=12063 warmup=58 markets=36 btcusdt[σ=0.050 iv=0.322 μ=+0.126] ethusdt[σ=0.050 iv=0.482 μ=+0.004] top-raw-gap=-1.000 ()
+13:00:16 INFO     src.poly_universe  Universe: 36 tradeable BTC/ETH markets (1 page(s), 72 BTC/ETH seen)
+13:00:16 INFO     __main__  Universe refreshed: 36 markets
+13:00:46 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=10281 warmup=11 markets=36 btcusdt[σ=0.050 iv=0.322 μ=-0.165] ethusdt[σ=0.062 iv=0.482 μ=+0.018] top-raw-gap=-1.000 ()
+13:00:46 INFO     src.poly_universe  Universe: 36 tradeable BTC/ETH markets (1 page(s), 72 BTC/ETH seen)
+13:00:46 INFO     __main__  Universe refreshed: 36 markets
+13:01:16 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=16 no-book=14892 warmup=0 markets=36 btcusdt[σ=0.051 iv=0.322 μ=-0.042] ethusdt[σ=0.056 iv=0.482 μ=-0.192] top-raw-gap=-1.000 ()
+13:01:16 INFO     src.poly_universe  Universe: 36 tradeable BTC/ETH markets (1 page(s), 72 BTC/ETH seen)
+13:01:16 INFO     __main__  Universe refreshed: 36 markets
+13:01:46 INFO     __main__  HEARTBEAT eval=148 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=15222 warmup=42 markets=36 btcusdt[σ=0.069 iv=0.322 μ=-0.017] ethusdt[σ=0.061 iv=0.482 μ=+0.115] top-raw-gap=-1.000 ()
+13:01:46 ERROR    src.poly_universe  Gamma API fetch failed at offset 0: 429, message='Too Many Requests', url='https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=500&start_date_min=2026-06-22T07:01:46Z&offset=0&order=endDate&ascending=true'
+13:01:46 INFO     src.poly_universe  Universe: 0 tradeable markets (0 page(s), 0 BTC/ETH seen) — pre-listed but not yet accepting orders, or outside window
+13:01:46 INFO     __main__  Universe refreshed: 0 markets
+13:02:17 INFO     src.poly_universe  Universe: 36 tradeable BTC/ETH markets (1 page(s), 72 BTC/ETH seen)
+13:02:17 INFO     __main__  Universe refreshed: 36 markets
+13:02:17 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=376 warmup=0 markets=36 btcusdt[σ=0.050 iv=0.322 μ=-0.070] ethusdt[σ=0.070 iv=0.482 μ=+0.110] top-raw-gap=-1.000 ()
+13:02:47 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=32 no-book=9507 warmup=4 markets=36 btcusdt[σ=0.050 iv=0.322 μ=-0.083] ethusdt[σ=0.055 iv=0.482 μ=+0.011] top-raw-gap=-1.000 ()
+13:02:47 INFO     src.poly_universe  Universe: 36 tradeable BTC/ETH markets (1 page(s), 72 BTC/ETH seen)
+13:02:47 INFO     __main__  Universe refreshed: 36 markets
+13:03:17 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=16 no-book=8173 warmup=0 markets=36 btcusdt[σ=0.050 iv=0.322 μ=+0.049] ethusdt[σ=0.050 iv=0.482 μ=-0.007] top-raw-gap=-1.000 ()
+13:03:17 INFO     src.poly_universe  Universe: 36 tradeable BTC/ETH markets (1 page(s), 72 BTC/ETH seen)
+13:03:17 INFO     __main__  Universe refreshed: 36 markets
+13:03:47 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=8926 warmup=0 markets=36 btcusdt[σ=0.050 iv=0.322 μ=-0.076] ethusdt[σ=0.050 iv=0.482 μ=-0.076] top-raw-gap=-1.000 ()
+13:03:47 INFO     src.poly_universe  Universe: 36 tradeable BTC/ETH markets (1 page(s), 72 BTC/ETH seen)
+13:03:47 INFO     __main__  Universe refreshed: 36 markets
+13:04:17 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=12765 warmup=0 markets=36 btcusdt[σ=0.050 iv=0.322 μ=+0.083] ethusdt[σ=0.050 iv=0.482 μ=-0.112] top-raw-gap=-1.000 ()
+13:04:18 INFO     src.poly_universe  Universe: 36 tradeable BTC/ETH markets (1 page(s), 72 BTC/ETH seen)
+13:04:18 INFO     __main__  Universe refreshed: 36 markets
+13:04:47 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=10724 warmup=0 markets=36 btcusdt[σ=0.074 iv=0.322 μ=+0.167] ethusdt[σ=0.120 iv=0.483 μ=+0.189] top-raw-gap=-1.000 ()
+13:04:48 INFO     src.poly_universe  Universe: 36 tradeable BTC/ETH markets (1 page(s), 72 BTC/ETH seen)
+13:04:48 INFO     __main__  Universe refreshed: 36 markets
+13:05:17 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=16152 warmup=0 markets=36 btcusdt[σ=0.093 iv=0.322 μ=+0.052] ethusdt[σ=0.114 iv=0.483 μ=+0.070] top-raw-gap=-1.000 ()
+13:05:18 INFO     src.poly_universe  Universe: 36 tradeable BTC/ETH markets (1 page(s), 72 BTC/ETH seen)
+13:05:18 INFO     __main__  Universe refreshed: 36 markets
+13:05:47 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=23956 warmup=0 markets=36 btcusdt[σ=0.070 iv=0.322 μ=+0.144] ethusdt[σ=0.145 iv=0.482 μ=+0.023] top-raw-gap=-1.000 ()
+13:05:48 INFO     src.poly_universe  Universe: 36 tradeable BTC/ETH markets (1 page(s), 72 BTC/ETH seen)
+13:05:48 INFO     __main__  Universe refreshed: 36 markets
+13:06:17 INFO     __main__  HEARTBEAT eval=12 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=9109 warmup=0 markets=36 btcusdt[σ=0.082 iv=0.322 μ=+0.007] ethusdt[σ=0.243 iv=0.482 μ=+0.018] top-raw-gap=-1.000 ()
+13:06:18 INFO     src.poly_universe  Universe: 36 tradeable BTC/ETH markets (1 page(s), 72 BTC/ETH seen)
+13:06:18 INFO     __main__  Universe refreshed: 36 markets
+13:06:27 WARNING  src.binance_ws  Binance WS closed (sent 1011 (internal error) keepalive ping timeout; no close frame received), reconnecting in 1.0s
+13:06:29 INFO     src.binance_ws  Binance WS connected: wss://stream.binance.com:443/stream?streams=btcusdt@bookTicker/btcusdt@aggTrade
+13:06:47 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=220 no-book=15552 warmup=0 markets=36 btcusdt[σ=0.145 iv=0.321 μ=+0.125] ethusdt[σ=0.235 iv=0.466 μ=-0.030] top-raw-gap=-1.000 ()
+13:06:48 INFO     src.poly_universe  Universe: 36 tradeable BTC/ETH markets (1 page(s), 72 BTC/ETH seen)
+13:06:48 INFO     __main__  Universe refreshed: 36 markets
+13:07:17 INFO     __main__  HEARTBEAT eval=83 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=19730 warmup=0 markets=36 btcusdt[σ=0.169 iv=0.321 μ=+0.040] ethusdt[σ=0.210 iv=0.466 μ=-0.001] top-raw-gap=-1.000 ()
+13:07:19 INFO     src.poly_universe  Universe: 36 tradeable BTC/ETH markets (1 page(s), 72 BTC/ETH seen)
+13:07:19 INFO     __main__  Universe refreshed: 36 markets
+13:07:47 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=25068 warmup=0 markets=36 btcusdt[σ=0.136 iv=0.321 μ=+0.112] ethusdt[σ=0.156 iv=0.466 μ=-0.103] top-raw-gap=-1.000 ()
+13:07:49 INFO     src.poly_universe  Universe: 36 tradeable BTC/ETH markets (1 page(s), 72 BTC/ETH seen)
+13:07:49 INFO     __main__  Universe refreshed: 36 markets
+13:08:17 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=17780 warmup=0 markets=36 btcusdt[σ=0.101 iv=0.321 μ=+0.014] ethusdt[σ=0.119 iv=0.466 μ=+0.068] top-raw-gap=-1.000 ()
+13:08:19 INFO     src.poly_universe  Universe: 36 tradeable BTC/ETH markets (1 page(s), 72 BTC/ETH seen)
+13:08:19 INFO     __main__  Universe refreshed: 36 markets
+13:08:48 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=23064 warmup=0 markets=36 btcusdt[σ=0.093 iv=0.321 μ=-0.050] ethusdt[σ=0.104 iv=0.466 μ=-0.050] top-raw-gap=-1.000 ()
+13:08:48 WARNING  src.poly_ws  Polymarket WS closed (no close frame received or sent), reconnecting in 1.0s
+13:08:49 INFO     src.poly_universe  Universe: 36 tradeable BTC/ETH markets (1 page(s), 72 BTC/ETH seen)
+13:08:49 INFO     __main__  Universe refreshed: 36 markets
+13:08:49 INFO     src.poly_ws  Polymarket WS connected: wss://ws-subscriptions-clob.polymarket.com/ws/market
+13:09:18 INFO     __main__  HEARTBEAT eval=2047 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=18504 warmup=0 markets=36 btcusdt[σ=0.085 iv=0.321 μ=-0.037] ethusdt[σ=0.099 iv=0.466 μ=-0.032] top-raw-gap=-1.000 ()
+13:09:19 INFO     src.poly_universe  Universe: 36 tradeable BTC/ETH markets (1 page(s), 72 BTC/ETH seen)
+13:09:19 INFO     __main__  Universe refreshed: 36 markets
+13:09:48 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=19228 warmup=0 markets=36 btcusdt[σ=0.076 iv=0.321 μ=+0.035] ethusdt[σ=0.094 iv=0.467 μ=-0.138] top-raw-gap=-1.000 ()
+13:09:50 INFO     src.poly_universe  Universe: 36 tradeable BTC/ETH markets (1 page(s), 72 BTC/ETH seen)
+13:09:50 INFO     __main__  Universe refreshed: 36 markets
+13:10:18 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=20924 warmup=0 markets=36 btcusdt[σ=0.071 iv=0.321 μ=-0.091] ethusdt[σ=0.077 iv=0.467 μ=+0.082] top-raw-gap=-1.000 ()
+13:10:20 INFO     src.poly_universe  Universe: 36 tradeable BTC/ETH markets (1 page(s), 72 BTC/ETH seen)
+13:10:20 INFO     __main__  Universe refreshed: 36 markets
+13:10:48 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=24576 warmup=0 markets=36 btcusdt[σ=0.071 iv=0.321 μ=-0.071] ethusdt[σ=0.069 iv=0.467 μ=-0.080] top-raw-gap=-1.000 ()
+13:10:50 INFO     src.poly_universe  Universe: 36 tradeable BTC/ETH markets (1 page(s), 72 BTC/ETH seen)
+13:10:50 INFO     __main__  Universe refreshed: 36 markets
+13:11:18 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=24600 warmup=0 markets=36 btcusdt[σ=0.082 iv=0.321 μ=-0.086] ethusdt[σ=0.089 iv=0.467 μ=-0.142] top-raw-gap=-1.000 ()
+13:11:20 INFO     src.poly_universe  Universe: 36 tradeable BTC/ETH markets (1 page(s), 72 BTC/ETH seen)
+13:11:20 INFO     __main__  Universe refreshed: 36 markets
+13:11:48 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=22588 warmup=0 markets=36 btcusdt[σ=0.088 iv=0.321 μ=-0.096] ethusdt[σ=0.103 iv=0.490 μ=-0.170] top-raw-gap=-1.000 ()
+13:11:50 INFO     src.poly_universe  Universe: 36 tradeable BTC/ETH markets (1 page(s), 72 BTC/ETH seen)
+13:11:50 INFO     __main__  Universe refreshed: 36 markets
+13:12:18 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=16848 warmup=0 markets=36 btcusdt[σ=0.083 iv=0.321 μ=+0.019] ethusdt[σ=0.095 iv=0.490 μ=+0.105] top-raw-gap=-1.000 ()
+13:12:21 INFO     src.poly_universe  Universe: 36 tradeable BTC/ETH markets (1 page(s), 72 BTC/ETH seen)
+13:12:21 INFO     __main__  Universe refreshed: 36 markets
+13:12:48 INFO     __main__  HEARTBEAT eval=0 signals=0 fills=0 arbs=0 arb-fills=0 no-spot=0 no-book=19064 warmup=0 markets=36 btcusdt[σ=0.160 iv=0.322 μ=+0.128] ethusdt[σ=0.135 iv=0.470 μ=+0.139] top-raw-gap=-1.000 ()
+13:12:51 INFO     src.poly_universe  Universe: 36 tradeable BTC/ETH markets (1 page(s), 72 BTC/ETH seen)
+13:12:51 INFO     __main__  Universe refreshed: 36 markets

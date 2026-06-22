@@ -109,6 +109,11 @@ mark_5s mark_30s resolution adverse_bps rebate_earned
 
 ## 3. Component 1 — Decision telemetry
 
+**Status:** implemented initial Phase A. `src.telemetry.DecisionTrace` and
+`Recorder` write `decisions.db`; `SignalGenerator.evaluate(trace=...)` populates
+the model/reject/signal fields; `main.py` records eval/risk/exec-stage rows;
+`src.decision_analysis` reports the funnel.
+
 ### 3a. Reject-reason taxonomy (exact `evaluate()` return points)
 
 `TTE_TOO_SHORT, TTE_TOO_LONG, UPDOWN_SKIPPED, STRIKE_UNSET, SPOT_MISSING,
@@ -139,7 +144,29 @@ Instantiate `Recorder(run_id)`; build a `DecisionTrace` per candidate; pass to
 **Acceptance:** funnel reconstructable; < 1% hot-path overhead (heartbeat
 timing); queue-drop counter ≈ 0 under normal load.
 
+Quick report:
+
+```bash
+python -m src.decision_analysis --db data/db/decisions.db --hours 8
+```
+
+Env knobs:
+
+```bash
+TELEMETRY_ENABLED=1              # default on; set 0/off/false to disable
+TELEMETRY_DB_PATH=data/db/decisions.db
+TELEMETRY_REJECT_SAMPLE=0.02
+TELEMETRY_QUEUE_SIZE=10000
+TELEMETRY_BATCH_SIZE=250
+RUN_ID=my-paper-run
+```
+
 ## 4. Component 2 — Raw Polymarket capture
+
+**Status:** initial Phase B implemented. `PolyWS` accepts an optional event sink
+and emits top-of-book changes; `Recorder` writes moved top-of-book events and
+periodic full-depth snapshots to `poly_events/<run_id>/<hour>.jsonl.gz` with a
+manifest. Event capture is tied to telemetry and is nonblocking/drop-counted.
 
 - Optional `event_sink` on `PolyWS._handle`; push top-of-book when
   `_refresh_top` returns `moved`; timer pushes full-L2 snapshots every N s.
@@ -149,7 +176,19 @@ timing); queue-drop counter ≈ 0 under normal load.
 **Acceptance:** a recorded shard rebuilds the exact `BookSnapshot` timeline the
 live `poly_ws.snapshot()` produced (replay-parity test).
 
+Env knobs:
+
+```bash
+POLY_EVENTS_ENABLED=1
+POLY_EVENTS_DIR=poly_events
+POLY_EVENT_QUEUE_SIZE=20000
+```
+
 ## 5. Component 3 — Outcome backfill (`src/backfill.py`)
+
+**Status:** initial implementation added. `python -m src.backfill --db data/db/decisions.db`
+fills `resolution` and `realized_pnl` for signal rows where side/price/size are
+known. Edge persistence and executable labels remain for replay-backed passes.
 
 Nightly job over unlabeled `decisions` (reuses `pnl._fetch_resolution`):
 
@@ -163,6 +202,10 @@ Nightly job over unlabeled `decisions` (reuses `pnl._fetch_resolution`):
 Produces labels: `edge_persisted`, `executable`, `won`.
 
 ## 6. Component 4 — Replay engine (`src/replay.py`)
+
+**Status:** initial shard loader added. `python -m src.replay poly_events/<run_id>`
+loads gzip JSONL shards and rebuilds latest `BookSnapshot` state. Full
+counterfactual evaluate/sweep/OOS replay remains next.
 
 1. Load recorded poly timeline for the window.
 2. Refetch Binance klines+aggTrades (`MicroReplay`).
@@ -185,6 +228,10 @@ fills within tolerance (replay-parity); sweeps deterministic given a seed.
 
 ## 7. Component 5 — Shadow-maker canary (`src/canary.py`)
 
+**Status:** canary schema/report skeleton added. It does not place orders yet;
+`CANARY_ENABLED` remains default-off and future work must add live post-only
+probe placement with exposure caps.
+
 The only execution-truth source. Live, post-only, **tiny**.
 
 - `Executor` shadow mode / `CanaryTrader`: post real $1–2 post-only orders at the
@@ -198,6 +245,9 @@ The only execution-truth source. Live, post-only, **tiny**.
 **and** adverse-selection drift ≤ rebate + edge.
 
 ## 8. Component 6 — Backtest downgrade (`src/backtest.py`)
+
+**Status:** initial realism flags added: `--dump-fills`, `--skip-first-secs`,
+`--nofill-tail`, `--persistence-cents`, and `--short-tte-sigma-floor`.
 
 Keep for pricing-edge research at scale; stop it lying:
 
@@ -225,6 +275,10 @@ fraction; headline becomes believable (low-single-digit pp).
 | Combinatorial / x-venue | Decisions + canary | observed credit, leg-fill | both legs fill, credit>0 |
 
 ## 10. Metrics & dashboards (`src/decision_analysis.py`, extends `pnl_attribution`)
+
+**Status:** initial funnel dashboard added. It reports stages, reject reasons,
+signal side/execution mix, resolved signal PnL when backfilled, and persistence
+fields when available.
 
 Eligibility funnel (reason × stage); edge-persistence curve (edge@0/5s/30s — the
 "did it vanish?" answer); calibration (p_fair vs realized — reuse Brier code);

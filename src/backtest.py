@@ -112,6 +112,11 @@ class BacktestConfig:
     carry_annual: float = 0.0            # perp-funding carry fed to the pricer
     maker_fill_prob: float = 1.0         # P(resting maker order is hit); <1 = honest
     ofi_replay: bool = False             # replay Binance aggTrades → OFI/ML overlay
+    dump_fills: bool = False
+    skip_first_secs: float = 0.0
+    nofill_tail: float = 0.0             # reject prices below x or above 1-x when >0
+    persistence_cents: float = 0.0       # require prev/next print within x cents when >0
+    short_tte_sigma_floor: float = 0.0   # additional sigma floor for short-TTE realism
 
 
 @dataclass
@@ -686,8 +691,17 @@ async def _process_market(
             mkt_max_raw = 0.0     # best gross edge (no eps/wedge) seen this market
             mkt_fired = False
             fill_rng = random.Random(yes_token)
-            for poly_ts, poly_price in history:
+            for hist_idx, (poly_ts, poly_price) in enumerate(history):
                 if poly_price <= 0 or poly_price >= 1:
+                    continue
+                if cfg.skip_first_secs > 0 and poly_ts < start_ts + cfg.skip_first_secs:
+                    diag["min_skip_early"] += 1
+                    continue
+                if cfg.nofill_tail > 0 and (poly_price < cfg.nofill_tail or poly_price > 1.0 - cfg.nofill_tail):
+                    diag["min_tail_nofill"] += 1
+                    continue
+                if cfg.persistence_cents > 0 and not _price_persisted(history, hist_idx, cfg.persistence_cents):
+                    diag["min_not_persistent"] += 1
                     continue
                 tte = expiry - poly_ts
                 if tte <= 0:
@@ -701,6 +715,8 @@ async def _process_market(
                 sigma = sigmas.get(kts)
                 if not sigma or sigma <= 0.05:
                     continue
+                if cfg.short_tte_sigma_floor > 0 and tte < 1800:
+                    sigma = max(sigma, cfg.short_tte_sigma_floor)
 
                 diag["min_evaluable"] += 1
                 half = cfg.half_spread
@@ -788,6 +804,14 @@ async def _process_market(
                     is_maker=sig.is_maker,
                     expiry_ts=expiry,
                 ))
+                if cfg.dump_fills:
+                    print(
+                        "DUMP_FILL "
+                        f"side={sig.side.value} px={sig.price:.4f} poly={poly_price:.4f} "
+                        f"spot={spot:.2f} strike={strike:.2f} tte={tte:.1f} "
+                        f"sigma={sigma:.4f} p_raw={p_raw:.4f} p_star={sig.p_star:.4f} "
+                        f"res={resolution:.0f} q={q[:70]}"
+                    )
 
                 # One independent sample per market unless --all-fills.
                 if not cfg.all_fills:
@@ -818,6 +842,9 @@ def _print_diag(diag: "Counter") -> None:
     print(f"      fired a fill:        {diag['mkt_fired']}")
     print(f"      edge eaten by costs/overlays/gates: {diag['mkt_edge_eaten']}")
     print(f"  minutes evaluable:       {diag['min_evaluable']}")
+    print(f"    skipped early window:  {diag['min_skip_early']}")
+    print(f"    tail non-fillable:     {diag['min_tail_nofill']}")
+    print(f"    not price-persistent:  {diag['min_not_persistent']}")
     print(f"    raw gross edge > 0:    {diag['min_raw_edge_pos']}")
     print(f"    price-gated (ask>max or bid<min): {diag['min_price_gated']}")
     print(f"    actually fired:        {diag['min_fired']}")
@@ -850,6 +877,15 @@ def _available_worker_count(reserve: int = 2) -> int:
         load_1m = 0.0
     available = max(1, math.floor(total - load_1m))
     return max(1, available - reserve)
+
+
+def _price_persisted(history: list[tuple[float, float]], idx: int, max_move: float) -> bool:
+    if idx <= 0 or idx >= len(history) - 1:
+        return False
+    px = history[idx][1]
+    prev_px = history[idx - 1][1]
+    next_px = history[idx + 1][1]
+    return abs(px - prev_px) <= max_move and abs(next_px - px) <= max_move
 
 
 def _select_markets(markets: list[dict], max_markets: int) -> list[dict]:
@@ -975,6 +1011,16 @@ def cli() -> None:
                         help="P(resting maker order is filled); <1 is the honest setting")
     parser.add_argument("--ofi-replay", action="store_true",
                         help="replay Binance aggTrades to activate the OFI/ML/momentum overlay")
+    parser.add_argument("--dump-fills", action="store_true",
+                        help="print per-fill internals for diagnosing backtest artifacts")
+    parser.add_argument("--skip-first-secs", type=float, default=0.0,
+                        help="skip the first N seconds after market start")
+    parser.add_argument("--nofill-tail", type=float, default=0.0,
+                        help="treat prices below x or above 1-x as non-fillable when >0")
+    parser.add_argument("--persistence-cents", type=float, default=0.0,
+                        help="require prev/current/next history prints within this price distance")
+    parser.add_argument("--short-tte-sigma-floor", type=float, default=0.0,
+                        help="extra annual sigma floor when tte < 30m")
     parser.add_argument("--debug", action="store_true",
                         help="always print the drop-reason diagnostics")
     parser.add_argument("--log-level", default="INFO")
@@ -996,6 +1042,11 @@ def cli() -> None:
         carry_annual=args.carry_annual,
         maker_fill_prob=args.maker_fill_prob,
         ofi_replay=args.ofi_replay,
+        dump_fills=args.dump_fills,
+        skip_first_secs=args.skip_first_secs,
+        nofill_tail=args.nofill_tail,
+        persistence_cents=args.persistence_cents,
+        short_tte_sigma_floor=args.short_tte_sigma_floor,
         debug=args.debug,
     )
     fills = asyncio.run(backtest(cfg))

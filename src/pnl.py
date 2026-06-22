@@ -21,7 +21,9 @@ from dataclasses import dataclass
 
 import aiohttp
 
-DB_PATH = "fills.db"
+from .storage import default_db_path
+
+DB_PATH = default_db_path("fills.db")
 GAMMA_API = "https://gamma-api.polymarket.com/markets"
 CLOB_BOOK = "https://clob.polymarket.com/book"
 

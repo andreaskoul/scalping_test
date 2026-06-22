@@ -1,0 +1,6 @@
+{
+  "run_id": "run-1782124707-c85fc53d",
+  "created_ts": 1782124707.94901,
+  "format": "jsonl.gz",
+  "event": "top_of_book_on_move; full levels on periodic snapshots"
+}

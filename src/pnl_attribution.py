@@ -30,6 +30,7 @@ from collections import defaultdict
 import aiohttp
 
 from .pnl import _fetch_resolution
+from .storage import default_db_path
 
 
 def _price_bucket(px: float) -> str:
@@ -90,7 +91,7 @@ def _stats(pnls: list[float]) -> tuple[float, float, float]:
     return total, mean, (mean / se if se > 0 else 0.0)
 
 
-async def attribute(db_path: str = "fills.db") -> None:
+async def attribute(db_path: str = default_db_path("fills.db")) -> None:
     try:
         fills = _load_fills(db_path)
     except sqlite3.OperationalError:
@@ -183,7 +184,7 @@ def _calibration_report(calib: list[tuple[float, float]]) -> None:
 
 def cli() -> None:
     ap = argparse.ArgumentParser(description="PnL attribution + calibration audit on fills.db")
-    ap.add_argument("--db", default="fills.db")
+    ap.add_argument("--db", default=default_db_path("fills.db"))
     args = ap.parse_args()
     asyncio.run(attribute(args.db))
 

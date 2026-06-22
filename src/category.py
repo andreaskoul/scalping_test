@@ -44,6 +44,8 @@ import time
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
+from .storage import default_db_path
+
 log = logging.getLogger(__name__)
 
 STATE_PATH = "category_state.json"
@@ -165,7 +167,7 @@ class CategoryTracker:
 
 # --------- CLI: rebuild from fills.db + Gamma resolution lookup ---------
 
-async def _rebuild_from_fills(db_path: str = "fills.db") -> CategoryTracker:
+async def _rebuild_from_fills(db_path: str = default_db_path("fills.db")) -> CategoryTracker:
     import aiohttp
     from .pnl import _fetch_resolution, _fetch_book_mid
 
@@ -233,7 +235,7 @@ async def _rebuild_from_fills(db_path: str = "fills.db") -> CategoryTracker:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Category PnL tracker / blacklist manager")
     parser.add_argument("cmd", choices=["report", "rebuild", "clear"])
-    parser.add_argument("--db", default="fills.db")
+    parser.add_argument("--db", default=default_db_path("fills.db"))
     parser.add_argument("--state", default=STATE_PATH)
     args = parser.parse_args()
 
