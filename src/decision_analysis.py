@@ -83,16 +83,85 @@ def report(db_path: str, hours: float) -> None:
     for (side, exec_type), count in side_exec.most_common():
         print(f"  {side:5s} {exec_type:5s} {count:8d}")
 
-    persisted_5s = [row for row in signal_rows if row["edge_at_5s"] is not None]
-    persisted_30s = [row for row in signal_rows if row["edge_at_30s"] is not None]
-    if persisted_5s or persisted_30s:
-        print("\nEdge persistence:")
-        if persisted_5s:
-            med5 = sorted(float(row["edge_at_5s"]) for row in persisted_5s)[len(persisted_5s) // 2]
-            print(f"  median edge@5s:  {med5:+.4f} ({len(persisted_5s)} rows)")
-        if persisted_30s:
-            med30 = sorted(float(row["edge_at_30s"]) for row in persisted_30s)[len(persisted_30s) // 2]
-            print(f"  median edge@30s: {med30:+.4f} ({len(persisted_30s)} rows)")
+    _edge_persistence_section(signal_rows)
+    _executable_section(signal_rows)
+    _calibration_section(labeled_signals)
+
+
+def _median(values: list[float]) -> float:
+    s = sorted(values)
+    n = len(s)
+    if n == 0:
+        return 0.0
+    if n % 2 == 1:
+        return s[n // 2]
+    return 0.5 * (s[n // 2 - 1] + s[n // 2])
+
+
+def _chosen_edge_at_decision(row: sqlite3.Row) -> float | None:
+    """Edge@0: the live edge for the chosen side at decision time."""
+    side = (row["chosen_side"] or "").upper()
+    if side == "BUY" and row["edge_buy"] is not None:
+        return float(row["edge_buy"])
+    if side == "SELL" and row["edge_sell"] is not None:
+        return float(row["edge_sell"])
+    return None
+
+
+def _edge_persistence_section(signal_rows: list[sqlite3.Row]) -> None:
+    """Did the edge vanish after reaction lag? Median edge@0 / 5s / 30s."""
+    edge0 = [e for e in (_chosen_edge_at_decision(r) for r in signal_rows) if e is not None]
+    persisted_5s = [float(r["edge_at_5s"]) for r in signal_rows if r["edge_at_5s"] is not None]
+    persisted_30s = [float(r["edge_at_30s"]) for r in signal_rows if r["edge_at_30s"] is not None]
+    if not (edge0 or persisted_5s or persisted_30s):
+        return
+    print("\nEdge persistence (did the edge survive reaction lag?):")
+    if edge0:
+        print(f"  median edge@0:   {_median(edge0):+.4f} ({len(edge0)} rows)")
+    if persisted_5s:
+        print(f"  median edge@5s:  {_median(persisted_5s):+.4f} ({len(persisted_5s)} rows)")
+    if persisted_30s:
+        print(f"  median edge@30s: {_median(persisted_30s):+.4f} ({len(persisted_30s)} rows)")
+
+
+def _executable_section(signal_rows: list[sqlite3.Row]) -> None:
+    """Fraction of signals whose posted level would have traded through."""
+    labeled = [r for r in signal_rows if r["executable"] is not None]
+    if not labeled:
+        return
+    execu = sum(1 for r in labeled if int(r["executable"]))
+    print(
+        f"\nExecutable rate:   {execu / len(labeled) * 100:.1f}% "
+        f"({execu}/{len(labeled)} labelled signals traded through)"
+    )
+
+
+def _calibration_section(labeled_signals: list[sqlite3.Row]) -> None:
+    """p_fair vs realized resolution: Brier score + reliability gap.
+
+    Brier = mean((p_fair - outcome)^2). The no-skill baseline is the Brier of
+    always predicting the base rate, p_bar. A reliability gap < 0 (model Brier
+    below baseline) means the probabilities carry information.
+    """
+    pairs = [
+        (float(r["p_fair"]), float(r["resolution"]))
+        for r in labeled_signals
+        if r["p_fair"] is not None and r["resolution"] is not None
+    ]
+    # Only meaningful for binary {0,1} resolutions.
+    pairs = [(p, o) for p, o in pairs if o in (0.0, 1.0)]
+    if not pairs:
+        return
+    n = len(pairs)
+    brier = sum((p - o) ** 2 for p, o in pairs) / n
+    p_bar = sum(o for _, o in pairs) / n
+    baseline = sum((p_bar - o) ** 2 for _, o in pairs) / n
+    gap = brier - baseline
+    print("\nCalibration (p_fair vs realized resolution):")
+    print(f"  Brier:           {brier:.4f} (n={n})")
+    print(f"  No-skill Brier:  {baseline:.4f} (base rate p={p_bar:.3f})")
+    verdict = "informative" if gap < 0 else "no better than base rate"
+    print(f"  Reliability gap: {gap:+.4f} ({verdict})")
 
 
 def cli() -> None:
