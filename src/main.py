@@ -58,7 +58,8 @@ from .telemetry import DecisionTrace, Recorder
 
 log = logging.getLogger(__name__)
 
-UNIVERSE_REFRESH_SECS = 30.0    # re-poll Gamma API for new markets
+UNIVERSE_REFRESH_SECS = 60.0    # re-poll Gamma API for new markets
+UNIVERSE_BACKOFF_MAX = 300.0    # cap exponential backoff on Gamma 429/5xx
 DIRTY_POLL_SECS = 0.005         # 5ms backoff when nothing has changed
 FULL_SWEEP_SECS = 1.0           # backstop: re-evaluate everything at least once/sec
 HEARTBEAT_SECS = 30.0
@@ -94,7 +95,10 @@ async def _universe_refresher(
     When `use_ptb` is set, Up/Down strikes are anchored to the real Chainlink
     Price-to-Beat (window-open reference) here — off the hot path — replacing
     the old first-observation hack that forced SKIP_UPDOWN."""
+    backoff = UNIVERSE_REFRESH_SECS
+    prev_tokens: set[str] | None = None
     while True:
+        sleep_secs = UNIVERSE_REFRESH_SECS
         try:
             markets = await fetch_active_markets(session)
             if use_ptb and price_to_beat is not None:
@@ -123,7 +127,15 @@ async def _universe_refresher(
             # Index from token_id → market, so book-change events can be
             # mapped to the relevant market in O(1).
             state["by_token"] = {m.yes_token_id: m for m in markets}
-            log.info("Universe refreshed: %d markets", len(markets))
+            token_set = set(token_ids)
+            if token_set == prev_tokens:
+                # Universe unchanged — strikes/state still refreshed above, but
+                # demote the log so it stops spamming (2865 lines/24h before).
+                log.debug("Universe refreshed: %d markets (unchanged)", len(markets))
+            else:
+                log.info("Universe refreshed: %d markets", len(markets))
+            prev_tokens = token_set
+            backoff = UNIVERSE_REFRESH_SECS  # reset on success
             if missing:
                 log.warning(
                     "Skipping %d markets — no Binance feed for symbols: %s. "
@@ -132,8 +144,23 @@ async def _universe_refresher(
                     ",".join(f"{s}({n})" for s, n in missing.items()),
                 )
         except Exception as exc:
-            log.warning("Universe refresh failed: %s", exc)
-        await asyncio.sleep(UNIVERSE_REFRESH_SECS)
+            # Honor Retry-After on 429, else exponential backoff on 5xx/network
+            # so we stop hammering Gamma (the 24h run hit rate limits).
+            status = getattr(exc, "status", None)
+            retry_after = None
+            headers = getattr(exc, "headers", None)
+            if headers is not None:
+                try:
+                    retry_after = float(headers.get("Retry-After"))
+                except (TypeError, ValueError):
+                    retry_after = None
+            backoff = min(backoff * 2, UNIVERSE_BACKOFF_MAX)
+            sleep_secs = retry_after if retry_after else backoff
+            log.warning(
+                "Universe refresh failed (status=%s): %s; backing off %.0fs",
+                status, exc, sleep_secs,
+            )
+        await asyncio.sleep(sleep_secs)
 
 
 async def _xvenue_loop(
@@ -328,6 +355,10 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
     cum_eval = cum_no_spot = cum_no_book = cum_warmup = cum_signals = cum_fills = 0
     cum_arbs = cum_arb_fills = 0
     top_edge_seen = (-1.0, "")
+    # Count each genuinely-empty token's no-book at most once per heartbeat
+    # window instead of ~1000x/sec (24h run logged no-book=32k-40k/heartbeat
+    # and ballooned the telemetry DB).
+    no_book_counted: set[str] = set()
 
     last_heartbeat = time.monotonic()
     last_full_sweep = 0.0
@@ -425,17 +456,21 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
 
                 yes_book = poly_ws.snapshot(market.yes_token_id)
                 if yes_book is None:
-                    cum_no_book += 1
-                    if recorder is not None:
-                        trace = DecisionTrace.new(run_id, stage="universe")
-                        _populate_market_trace(trace, market, now_wall)
-                        trace.spot_bid = tick.bid
-                        trace.spot_ask = tick.ask
-                        trace.spot_mid = tick.mid
-                        trace.sigma = tick.sigma_annual
-                        trace.drift = getattr(tick, "drift_annual", 0.0)
-                        trace.mark_reject("NO_BOOK")
-                        recorder.record(trace)
+                    # Dedup: one count + at most one telemetry row per empty
+                    # token per heartbeat window (re-armed at the heartbeat).
+                    if market.yes_token_id not in no_book_counted:
+                        no_book_counted.add(market.yes_token_id)
+                        cum_no_book += 1
+                        if recorder is not None:
+                            trace = DecisionTrace.new(run_id, stage="universe")
+                            _populate_market_trace(trace, market, now_wall)
+                            trace.spot_bid = tick.bid
+                            trace.spot_ask = tick.ask
+                            trace.spot_mid = tick.mid
+                            trace.sigma = tick.sigma_annual
+                            trace.drift = getattr(tick, "drift_annual", 0.0)
+                            trace.mark_reject("NO_BOOK")
+                            recorder.record(trace)
                     continue
 
                 if tick.sigma_annual <= SIGMA_MIN:
@@ -636,16 +671,19 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
                     sigma_str_parts.append(f"{sym}[σ={s:.3f} iv={iv:.3f} μ={d:+.3f}]")
                 log.info(
                     "HEARTBEAT eval=%d signals=%d fills=%d arbs=%d arb-fills=%d "
-                    "no-spot=%d no-book=%d warmup=%d markets=%d %s top-raw-gap=%.3f (%s)",
+                    "no-spot=%d no-book=%d warmup=%d markets=%d poly-subs=%d/%d "
+                    "reconnects=%d %s top-raw-gap=%.3f (%s)",
                     cum_eval, cum_signals, cum_fills,
                     cum_arbs, cum_arb_fills,
                     cum_no_spot, cum_no_book, cum_warmup, len(markets),
+                    poly_ws.subscribed_count, poly_ws.tracked_count, poly_ws.reconnects,
                     " ".join(sigma_str_parts),
                     top_edge_seen[0], top_edge_seen[1][:50],
                 )
                 cum_eval = cum_no_spot = cum_no_book = cum_warmup = cum_signals = cum_fills = 0
                 cum_arbs = cum_arb_fills = 0
                 top_edge_seen = (-1.0, "")
+                no_book_counted.clear()
                 last_heartbeat = now_mono
 
     finally:

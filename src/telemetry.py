@@ -129,10 +129,16 @@ class Recorder:
         poly_events_enabled: bool = True,
         poly_event_queue_size: int = 20000,
         seed: int | None = None,
+        universe_reject_cap: int = 50000,
     ):
         self.run_id = run_id or f"run-{int(time.time())}-{uuid.uuid4().hex[:8]}"
         self.db_path = db_path
         self.reject_sample = max(0.0, min(1.0, reject_sample))
+        # Hard per-run cap on high-volume sampled rejects (NO_BOOK/NO_SPOT/
+        # WARMUP/...). Layered on top of `reject_sample` so the decisions DB can
+        # never balloon — an early uncapped run produced a 27 GB file.
+        self.universe_reject_cap = max(0, universe_reject_cap)
+        self.universe_recorded = 0
         self.queue: asyncio.Queue[DecisionTrace | None] = asyncio.Queue(maxsize=queue_size)
         self.poly_events_enabled = poly_events_enabled
         self.poly_events_dir = Path(poly_events_dir) / self.run_id
@@ -161,6 +167,7 @@ class Recorder:
             poly_events_enabled=os.getenv("POLY_EVENTS_ENABLED", "1").strip().lower()
             not in ("0", "false", "no", "off"),
             poly_event_queue_size=int(float(os.getenv("POLY_EVENT_QUEUE_SIZE", "20000"))),
+            universe_reject_cap=int(float(os.getenv("TELEMETRY_NOBOOK_MAX_PER_RUN", "50000"))),
         )
 
     async def start(self) -> None:
@@ -188,7 +195,15 @@ class Recorder:
             return True
         if trace.stage in ("risk", "exec"):
             return True
-        return self._rng.random() < self.reject_sample
+        # High-volume universe/eval rejects: reservoir-sample, then hard-cap the
+        # number actually kept per run so the DB stays bounded regardless of how
+        # long the bot runs or how many NO_BOOK spins occur.
+        if self._rng.random() >= self.reject_sample:
+            return False
+        if self.universe_recorded >= self.universe_reject_cap:
+            return False
+        self.universe_recorded += 1
+        return True
 
     def record(self, trace: DecisionTrace) -> None:
         if not self.should_record(trace):

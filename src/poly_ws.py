@@ -26,6 +26,7 @@ Public interface preserved: `update_tokens`, `snapshot`, `run`.
 import asyncio
 import json
 import logging
+import random
 import time
 from dataclasses import dataclass
 
@@ -40,8 +41,9 @@ CLOB_WS = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 
 # Re-subscribe whenever the universe changes; cap subscriptions per
 # message to avoid hitting any payload limit (observed: server accepts
-# 200+ ids per message but keep some headroom).
-SUBSCRIBE_BATCH: int = 100
+# 200+ ids per message but keep some headroom). At 250 the common BTC/ETH
+# universe (~144 YES/NO assets) subscribes in a single round-trip.
+SUBSCRIBE_BATCH: int = 250
 
 # REST fallback batch size when WS is down.
 REST_BATCH_SIZE: int = 100
@@ -137,6 +139,8 @@ class PolyWS:
         self._ws = None
         self._subscribed: set[str] = set()
         self._sub_lock = asyncio.Lock()
+        # Surfaced in the heartbeat so silent WS churn is visible.
+        self.reconnects = 0
         # Set whenever ANY tracked book changes — the orchestrator can
         # await this to drive event-driven evaluation instead of polling.
         self._book_change = asyncio.Event()
@@ -145,6 +149,14 @@ class PolyWS:
         self._dirty_tokens: set[str] = set()
 
     # ---------- public surface ----------
+
+    @property
+    def subscribed_count(self) -> int:
+        return len(self._subscribed)
+
+    @property
+    def tracked_count(self) -> int:
+        return len(self._token_ids)
 
     def snapshot(self, token_id: str) -> BookSnapshot | None:
         """O(1): reads the cached best-of-book updated by the WS handler."""
@@ -266,9 +278,11 @@ class PolyWS:
                         sub_task.cancel()
                         self._ws = None
             except ConnectionClosed as exc:
-                log.warning("Polymarket WS closed (%s), reconnecting in %.1fs", exc, delay)
+                self.reconnects += 1
+                log.warning("Polymarket WS closed (%s), reconnect #%d in ~%.1fs", exc, self.reconnects, delay)
             except Exception as exc:
-                log.error("Polymarket WS error: %s, reconnecting in %.1fs", exc, delay)
+                self.reconnects += 1
+                log.error("Polymarket WS error: %s, reconnect #%d in ~%.1fs", exc, self.reconnects, delay)
 
             # Bridge the gap with a REST refresh while we're disconnected.
             try:
@@ -276,7 +290,9 @@ class PolyWS:
             except Exception as exc:
                 log.debug("REST fallback refresh failed: %s", exc)
 
-            await asyncio.sleep(delay)
+            # Jitter the backoff so many clients/tokens don't reconnect in
+            # lockstep (the 24h run showed 102 reconnects with no jitter).
+            await asyncio.sleep(delay * random.uniform(0.75, 1.25))
             delay = min(delay * 2, RECONNECT_MAX)
 
     # ---------- internals ----------

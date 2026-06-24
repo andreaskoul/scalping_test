@@ -44,7 +44,7 @@ import time
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
-from .storage import default_db_path
+from .storage import default_db_path, env_db_path
 
 log = logging.getLogger(__name__)
 
@@ -167,17 +167,39 @@ class CategoryTracker:
 
 # --------- CLI: rebuild from fills.db + Gamma resolution lookup ---------
 
-async def _rebuild_from_fills(db_path: str = default_db_path("fills.db")) -> CategoryTracker:
+def _resolve_fills_db(db_path: str | None) -> str:
+    """Resolve the fills DB the executor actually wrote.
+
+    The executor uses `env_db_path("FILL_DB_PATH", "fills.db")`; the previous
+    reconcile hard-coded `data/db/fills.db` and crashed at shutdown with
+    'no such table: fills' whenever the run wrote e.g. fills_strict.db.
+    """
+    if db_path:
+        return db_path
+    return env_db_path("FILL_DB_PATH", "fills.db")
+
+
+async def _rebuild_from_fills(db_path: str | None = None) -> CategoryTracker:
     import aiohttp
     from .pnl import _fetch_resolution, _fetch_book_mid
 
+    db_path = _resolve_fills_db(db_path)
+    if not os.path.exists(db_path):
+        log.warning("Category reconcile: fills DB %s not found; skipping.", db_path)
+        return CategoryTracker()
+
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
-    fills = conn.execute(
-        "SELECT ts, market_id, token_id, side, price, size, fee, p_star, edge "
-        "FROM fills ORDER BY ts ASC"
-    ).fetchall()
-    conn.close()
+    try:
+        fills = conn.execute(
+            "SELECT ts, market_id, token_id, side, price, size, fee, p_star, edge "
+            "FROM fills ORDER BY ts ASC"
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        log.warning("Category reconcile: %s in %s; skipping.", exc, db_path)
+        return CategoryTracker()
+    finally:
+        conn.close()
 
     if not fills:
         return CategoryTracker()
@@ -235,7 +257,7 @@ async def _rebuild_from_fills(db_path: str = default_db_path("fills.db")) -> Cat
 def main() -> int:
     parser = argparse.ArgumentParser(description="Category PnL tracker / blacklist manager")
     parser.add_argument("cmd", choices=["report", "rebuild", "clear"])
-    parser.add_argument("--db", default=default_db_path("fills.db"))
+    parser.add_argument("--db", default=env_db_path("FILL_DB_PATH", "fills.db"))
     parser.add_argument("--state", default=STATE_PATH)
     args = parser.parse_args()
 
