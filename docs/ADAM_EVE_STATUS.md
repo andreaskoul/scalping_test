@@ -1,7 +1,7 @@
 # Adam & Eve — Goals, Literature, and Status
 
-_Analytical summary. Last updated 2026-06-25 (Eve cost-aware label + baseline
-harness landed; 217 tests passing)._
+_Analytical summary. Last updated 2026-06-25 (Eve cost-aware labels + baseline
+harness + cached Alpaca ingest landed, ingest verified live; 226 tests passing)._
 
 This repo is becoming **two sibling trading engines behind one validation spine**:
 
@@ -49,7 +49,7 @@ statistical gates — never on raw backtest means.
 | **Cost-aware labels & baselines (Eve, built)** | López de Prado triple-barrier / meta-labeling (*Advances in Financial ML*, 2018); FI-2010 ternary labels (Ntakaris et al., arXiv:1705.03233) + LOBCAST critique; bitcoin walk-forward under costs (arXiv:2606.00060) | `src/eve_labels.py`: the no-trade boundary **is** the round-trip cost (cost-aware execution filter); `src/eve_baselines.py`: required baseline set + anchored walk-forward scored on **post-cost expectancy** (not accuracy), reusing `stats.py` for CI/t/DSR. |
 | **Transformer perception (Eve, pass 2)** | TLOB (Berti & Kasneci 2025, arXiv:2502.15757, dual attention); DeepLOB (1808.03668); PatchTST (2211.14730, channel-independent patching); `thuml/Time-Series-Library`; LOBCAST benchmark (2308.01915) | Eve's planned model lane. **Caveat from the literature itself:** reported LOB F1 (70–90%) collapses under spread/cost-aware labels and generalizes poorly out-of-distribution → transformer must beat the baselines above *after costs*. |
 | **Research workflow** | `microsoft/qlib` patterns | Manifests, walk-forward, experiment versioning for Eve's lake. |
-| **Eve historical data** | Alpaca (`alpaca-py`): 10k items/page + pagination token, 200 req/min; crypto free, equities free = IEX | Historical-only ingestion; Alpaca is never a live feed or execution venue. |
+| **Eve historical data** | Alpaca Market Data API (`data.alpaca.markets`): `/v2/stocks/bars` (feed=iex free) + `/v1beta3/crypto/{loc}/bars`; ≤10k/page, `next_page_token` pagination, RFC-3339 bars `t/o/h/l/c/v/n/vw` | `src/eve_ingest.py`: cached, paginating, rate-limited downloader → Eve lake. **Two idempotency layers** (lake partition skip + persistent per-request response cache) so the same API call is never re-run; injectable transport (tests need no creds). Historical-only; Alpaca is never a live feed or execution venue. |
 | **RL/policy (later)** | `TradeMaster`, `FinRL` | Only after supervised, calibrated Eve is stable. |
 
 ---
@@ -133,19 +133,29 @@ statistical gates — never on raw backtest means.
   Validated on synthetic data: an AR(1) momentum signal lets `persistence`
   clear cost (t≈20); on pure noise **every** directional baseline goes negative
   after costs and the gate blocks — the FI-2010 failure mode, reproduced.
+- **Cached Alpaca ingest** (`src/eve_ingest.py`): paginating, rate-limited
+  downloader for stock (`/v2/stocks/bars`) and crypto (`/v1beta3/crypto/.../
+  bars`) historical bars → normalized lake partitions. **Two idempotency
+  layers** so the same API call is never re-run: a lake partition-exists skip
+  (no request built) and a persistent per-request response cache (`force`
+  re-ingest rebuilds from disk, zero network). Transport + sleep are injectable
+  so tests need no credentials. **Verified live** against the user's keys:
+  BTC/USD daily bars fetched, then a re-run made 0 network calls and a forced
+  re-run served 4/4 from cache.
 
 **Not built yet (pass 2):**
 
-- Actual **Alpaca historical ingest** (batch downloader, pagination/backoff/
-  checkpointing) — only normalization/lake-writing exists today, so the
-  baselines have run on synthetic bars, not real Alpaca data yet.
+- **Bulk historical pull** at training scale (the downloader works; we have only
+  fetched a few verification days so far) + run the `eve_baselines` harness on
+  **real** Alpaca bars instead of synthetic.
 - **Transformer wrapper** (compact temporal encoder / PatchTST-style; CPU+MPS
   smoke). Promotion rule now concretely enforceable: *it must beat the
   `eve_baselines` winner on post-cost expectancy on the same OOS series.*
 - **Advisory-only** predictions → paper → canary.
 
-Eve now has a **labeling scheme and the evaluation bar a model must clear**, but
-**no model, no real-data ingest, and no live adapters yet** — by design.
+Eve now has a **labeling scheme, the evaluation bar a model must clear, and a
+real (cached) ingest path**, but **no model and no live adapters yet** — by
+design.
 
 ---
 
@@ -190,14 +200,15 @@ eve:  paper_ok=false canary_ok=false live_ok=false
   signals and (b) a live maker canary — not more pricing work.
 - **Arbitrage** is settled: phantom-dominated, real edge trivial; parked behind
   the validator.
-- **Eve** now has cost-aware labels and a post-cost baseline bar (`eve_labels`,
-  `eve_baselines`); the gap to first signal is **real Alpaca ingest** (so the
-  baselines run on real bars) and only then a transformer that must beat them.
+- **Eve** now has cost-aware labels, a post-cost baseline bar (`eve_labels`,
+  `eve_baselines`), and a cached real-data ingest (`eve_ingest`, verified live);
+  the next step is a **bulk historical pull** and running the baselines on real
+  bars, then a transformer that must beat them.
 - **Verifier** exists in Adam-scoped form; the dual-engine version is the spine
   to build once Eve has a model worth gating.
 
 **Build order from here:** Adam live canary (execution truth) → full Verifier +
-Engine interfaces → ~~Eve baselines~~ ✓ → **Eve Alpaca ingest** (next) → run
-baselines on real bars → Eve transformer (must beat the baseline winner after
-costs) → Eve advisory. Live trading only after replay + canary + Verifier all
-pass.
+Engine interfaces → ~~Eve baselines~~ ✓ → ~~Eve Alpaca ingest~~ ✓ → **bulk
+historical pull + baselines on real bars** (next) → Eve transformer (must beat
+the baseline winner after costs) → Eve advisory. Live trading only after replay
++ canary + Verifier all pass.

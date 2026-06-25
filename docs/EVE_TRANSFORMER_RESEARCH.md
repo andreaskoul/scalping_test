@@ -203,9 +203,18 @@ Substrate and the evaluation bar are in place; the model is not.
   with block-bootstrap CI / HAC t / Deflated Sharpe from `src/stats.py`. This is
   the concrete realization of the gate *"the transformer must beat simple
   baselines after costs."*
-- **Pending — real Alpaca ingest**: the batch downloader (pagination/backoff/
-  checkpointing). Baselines have so far been validated on synthetic AR(1) bars;
-  they need real bars next.
+- **Done — cached Alpaca ingest** (`src/eve_ingest.py`): paginating,
+  rate-limited batch downloader for stock (`/v2/stocks/bars`) and crypto
+  (`/v1beta3/crypto/{loc}/bars`) bars on the Market Data host
+  (`data.alpaca.markets` — note the `.env` `ALPACA_ENDPOINT` is the trading
+  host; data uses a separate host / `ALPACA_DATA_ENDPOINT`). Two idempotency
+  layers ensure the same API call is never re-run: a lake partition-exists skip
+  and a persistent per-request response cache. Transport/sleep are injectable so
+  tests need no credentials. Verified live; pull is so far only a few
+  verification days.
+- **Pending — bulk historical pull + baselines on real bars**: run the cached
+  ingest at training scale, then the `eve_baselines` harness on real Alpaca data
+  (so far the baselines are validated on synthetic AR(1) bars).
 - **Pending — transformer wrapper, calibration, advisory consumption** (Stages
   1–5). A transformer is only worth building once it is run against the
   `eve_baselines` winner on the same out-of-sample, post-cost series.

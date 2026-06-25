@@ -12,3 +12,4 @@ dist/
 *.egg-info/
 HALT
 .venv
+data/lake/
