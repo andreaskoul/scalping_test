@@ -63,6 +63,7 @@ UNIVERSE_BACKOFF_MAX = 300.0    # cap exponential backoff on Gamma 429/5xx
 DIRTY_POLL_SECS = 0.005         # 5ms backoff when nothing has changed
 FULL_SWEEP_SECS = 1.0           # backstop: re-evaluate everything at least once/sec
 HEARTBEAT_SECS = 30.0
+ARB_COOLDOWN_SECS = 30.0        # dedup: don't re-fire the same arb_id every loop
 
 
 def _setup_logging(level: str = "INFO") -> None:
@@ -359,6 +360,9 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
     # window instead of ~1000x/sec (24h run logged no-book=32k-40k/heartbeat
     # and ballooned the telemetry DB).
     no_book_counted: set[str] = set()
+    # arb_id → monotonic ts of last execution, so one fleeting opportunity
+    # isn't re-fired every 5ms loop (the phantom rebalance fired 52x in 2s).
+    arb_cooldown: dict[str, float] = {}
 
     last_heartbeat = time.monotonic()
     last_full_sweep = 0.0
@@ -627,6 +631,9 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
                     bucket=cfg.bucket_arb_enabled,
                 )
                 for combo in combos:
+                    # Dedup: skip if this exact arb_id fired within the cooldown.
+                    if now_mono - arb_cooldown.get(combo.arb_id, 0.0) < ARB_COOLDOWN_SECS:
+                        continue
                     cum_arbs += 1
                     # One Signal per leg, all tagged with the shared arb_id so
                     # the PnL accountant can match them. Strike arbs have a
@@ -652,6 +659,7 @@ async def main(paper: bool, log_level: str = "INFO", duration_secs: float = 0.0)
                         continue
                     for f in combo_fills:
                         risk.record_fill(f.price * f.size)
+                    arb_cooldown[combo.arb_id] = now_mono
                     cum_arb_fills += 1
                     log.info(
                         "ARB EXECUTED %s [%s] credit=%.4f notional=%.2f legs=%d",

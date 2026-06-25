@@ -66,6 +66,7 @@ Caveats
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 
 from .poly_universe import PolyMarket
@@ -81,6 +82,24 @@ DEFAULT_MIN_CREDIT: float = 0.01
 # Cap notional on each leg.  The arb is symmetric so this is the
 # notional on either side, not the gross.
 DEFAULT_MAX_NOTIONAL_USD: float = 25.0
+
+# A two-leg arb is only fillable if BOTH legs' books are fresh AND were
+# observed near-simultaneously. Combining a fresh snapshot on one leg with a
+# stale one on the other manufactures phantom violations (e.g. a "crossed"
+# implied book) that vanish the instant you try to take them. Pass
+# max_book_age_secs=inf to disable (offline replay measures persistence instead).
+DEFAULT_MAX_BOOK_AGE_SECS: float = 1.5
+DEFAULT_MAX_PAIR_SKEW_SECS: float = 0.30
+
+
+def _stale(book: BookSnapshot, clk, max_age: float) -> bool:
+    return (clk() - book.ts) > max_age
+
+
+def _pair_inconsistent(a: BookSnapshot, b: BookSnapshot, max_skew: float) -> bool:
+    """Two legs whose snapshots are too far apart in time can't be filled as
+    one simultaneous trade — the implied joint book may never have existed."""
+    return abs(a.ts - b.ts) > max_skew
 
 
 @dataclass
@@ -138,14 +157,18 @@ def find_strike_arbs(
     max_notional_usd: float = DEFAULT_MAX_NOTIONAL_USD,
     min_tte_secs: float = 180.0,
     max_tte_secs: float = 3600.0,
+    max_book_age_secs: float = DEFAULT_MAX_BOOK_AGE_SECS,
+    clock=None,
 ) -> list[StrikeArb]:
     """Scan the threshold-market ladder for strike-monotonicity violations.
 
     Returns one StrikeArb per actionable pair, sized so each leg's
     notional is at most `max_notional_usd` and fits in the available
-    book depth on both sides.
+    book depth on both sides. Both legs' books must be fresh within
+    `max_book_age_secs` (pass inf to disable, e.g. for offline replay).
     """
     import time as _time
+    clk = clock or _time.monotonic
     out: list[StrikeArb] = []
     now_wall = _time.time()
 
@@ -169,6 +192,12 @@ def find_strike_arbs(
             book_low = poly_ws.snapshot(m_low.yes_token_id)
             book_high = poly_ws.snapshot(m_high.yes_token_id)
             if book_low is None or book_high is None:
+                continue
+            # Both legs must be fresh and near-simultaneous, else the violation
+            # is a stale cross-book phantom that won't fill.
+            if _stale(book_low, clk, max_book_age_secs) or _stale(book_high, clk, max_book_age_secs):
+                continue
+            if _pair_inconsistent(book_low, book_high, DEFAULT_MAX_PAIR_SKEW_SECS):
                 continue
 
             ask_low = book_low.best_ask
@@ -268,14 +297,21 @@ def find_rebalance_arbs(
     max_notional_usd: float = DEFAULT_MAX_NOTIONAL_USD,
     min_tte_secs: float = 60.0,
     max_tte_secs: float = 86400.0,
+    max_book_age_secs: float = DEFAULT_MAX_BOOK_AGE_SECS,
+    clock=None,
 ) -> list[ComboArb]:
     """Market-rebalancing arb: buy YES *and* NO when ask_YES + ask_NO < $1.
 
-    The old code asserted this was 'structurally unreachable' on the CLOB.
-    DRADIS and others exploit it on CLOB v2, so we scan for it directly:
-    buying both legs guarantees a $1 payoff at resolution for a sub-$1 cost.
+    WARNING — structurally impossible on Polymarket's UNIFIED order book:
+    a bid of x on YES is the same order as an ask of (1-x) on NO, so
+    ask_YES + ask_NO = ask_YES + (1 - bid_YES) = 1 + spread_YES >= 1 always
+    (Polymarket docs, "Prices & Orderbook"). Any observed sub-$1 sum is a
+    stale/crossed cross-book snapshot, not a fillable arb. Off by default
+    (config.rebalance_arb_enabled); the freshness + pair-skew gates below
+    suppress the phantom even if a non-mirrored venue re-enables it.
     """
     import time as _t
+    clk = clock or _t.monotonic
     out: list[ComboArb] = []
     now = _t.time()
     for m in markets:
@@ -285,6 +321,10 @@ def find_rebalance_arbs(
         yb = poly_ws.snapshot(m.yes_token_id)
         nb = poly_ws.snapshot(m.no_token_id)
         if yb is None or nb is None:
+            continue
+        if _stale(yb, clk, max_book_age_secs) or _stale(nb, clk, max_book_age_secs):
+            continue
+        if _pair_inconsistent(yb, nb, DEFAULT_MAX_PAIR_SKEW_SECS):
             continue
         ask_yes, ask_no = yb.best_ask, nb.best_ask
         if ask_yes <= 0 or ask_no <= 0 or ask_yes >= 1 or ask_no >= 1:
@@ -322,17 +362,21 @@ def find_bucket_arbs(
     max_notional_usd: float = DEFAULT_MAX_NOTIONAL_USD,
     min_tte_secs: float = 60.0,
     max_tte_secs: float = 86400.0,
+    max_book_age_secs: float = DEFAULT_MAX_BOOK_AGE_SECS,
+    clock=None,
 ) -> list[ComboArb]:
     """Box/bucket arb on the threshold ladder.
 
     For K_low < K_high at the same (symbol, expiry): buying YES(K_low) and
     NO(K_high) pays at least $1 in every outcome (and $2 when K_low<S<=K_high).
     If ask_YES(K_low) + ask_NO(K_high) < $1 − fees, that floor-$1 payoff costs
-    less than $1 → arbitrage with positive skew.
+    less than $1 → arbitrage with positive skew. Both legs must be fresh and
+    near-simultaneous (pass max_book_age_secs=inf for offline replay).
     """
+    import time as _t
+    clk = clock or _t.monotonic
     out: list[ComboArb] = []
     for (sym, exp_ts), ladder in _ladder(markets).items():
-        import time as _t
         tte = exp_ts - _t.time()
         if tte < min_tte_secs or tte > max_tte_secs or len(ladder) < 2:
             continue
@@ -341,6 +385,10 @@ def find_bucket_arbs(
             yb_low = poly_ws.snapshot(m_low.yes_token_id)
             nb_high = poly_ws.snapshot(m_high.no_token_id)
             if yb_low is None or nb_high is None:
+                continue
+            if _stale(yb_low, clk, max_book_age_secs) or _stale(nb_high, clk, max_book_age_secs):
+                continue
+            if _pair_inconsistent(yb_low, nb_high, DEFAULT_MAX_PAIR_SKEW_SECS):
                 continue
             ay, an = yb_low.best_ask, nb_high.best_ask
             if ay <= 0 or an <= 0 or ay >= 1 or an >= 1:
@@ -400,14 +448,21 @@ def scan_combos(
     max_tte_secs: float = 86400.0,
     rebalance: bool = True,
     bucket: bool = True,
+    max_book_age_secs: float = DEFAULT_MAX_BOOK_AGE_SECS,
+    clock=None,
 ) -> list[ComboArb]:
     """All single-venue combinatorial arbs as a unified ComboArb list."""
     combos = [
         _strike_to_combo(s) for s in find_strike_arbs(
-            markets, poly_ws, min_credit, max_notional_usd, min_tte_secs, max_tte_secs)
+            markets, poly_ws, min_credit, max_notional_usd, min_tte_secs,
+            max_tte_secs, max_book_age_secs, clock)
     ]
     if rebalance:
-        combos += find_rebalance_arbs(markets, poly_ws, min_credit, max_notional_usd, min_tte_secs, max_tte_secs)
+        combos += find_rebalance_arbs(
+            markets, poly_ws, min_credit, max_notional_usd, min_tte_secs,
+            max_tte_secs, max_book_age_secs, clock)
     if bucket:
-        combos += find_bucket_arbs(markets, poly_ws, min_credit, max_notional_usd, min_tte_secs, max_tte_secs)
+        combos += find_bucket_arbs(
+            markets, poly_ws, min_credit, max_notional_usd, min_tte_secs,
+            max_tte_secs, max_book_age_secs, clock)
     return combos

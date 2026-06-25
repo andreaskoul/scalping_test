@@ -111,7 +111,12 @@ class Settings:
     # ---- static / combinatorial arb ----
     arb_enabled: bool = True
     arb_min_credit: float = 0.0
-    rebalance_arb_enabled: bool = True   # YES+NO < 1 within a market
+    # Structurally impossible on Polymarket's UNIFIED order book: a bid of x on
+    # YES is the same order as an ask of 1-x on NO, so ask_YES + ask_NO =
+    # 1 + spread_YES >= 1 always. Any observed YES+NO < 1 is a stale/crossed
+    # cross-book snapshot (phantom), not a fillable arb — off by default. Keep
+    # the env override only for genuinely non-mirrored venues.
+    rebalance_arb_enabled: bool = False  # YES+NO < 1 within a market
     bucket_arb_enabled: bool = True      # mutually-exclusive multi-outcome sum
 
     # ---- kelly ----
@@ -174,7 +179,7 @@ class Settings:
 
             arb_enabled=_b("ARB_ENABLED", True),
             arb_min_credit=_f("ARB_MIN_CREDIT", 0.01),
-            rebalance_arb_enabled=_b("REBALANCE_ARB_ENABLED", True),
+            rebalance_arb_enabled=_b("REBALANCE_ARB_ENABLED", False),
             bucket_arb_enabled=_b("BUCKET_ARB_ENABLED", True),
 
             kelly_enabled=_b("KELLY_ENABLED", True),
