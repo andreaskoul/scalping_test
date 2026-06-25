@@ -1,7 +1,7 @@
 # Adam & Eve — Goals, Literature, and Status
 
-_Analytical summary. Last updated 2026-06-25 (Eve cost-aware labels + baseline
-harness + cached Alpaca ingest landed, ingest verified live; 226 tests passing)._
+_Analytical summary. Last updated 2026-06-25 (Eve ran its first **real-data**
+baseline verdict on ~280k Alpaca crypto 1-min bars; 229 tests passing)._
 
 This repo is becoming **two sibling trading engines behind one validation spine**:
 
@@ -143,19 +143,36 @@ statistical gates — never on raw backtest means.
   BTC/USD daily bars fetched, then a re-run made 0 network calls and a forced
   re-run served 4/4 from cache.
 
+- **Lake read-back + real-data verdict** (`eve_data.read_symbol_bars`,
+  `eve_baselines.build_report_from_lake`): partitions are **timeframe-scoped**
+  (`bars-1min` vs `bars-1day`, so timeframes never collide on a shared date),
+  and the baseline verdict runs straight off real lake bars.
+
+**Honest first real-data finding (crypto 1-min):**
+
+- Pulled **BTC/USD (164k)** + **ETH/USD (114k)** Alpaca 1-min bars (Mar–Jun
+  2026). On both, with a 3 bps round-trip cost, **every directional baseline is
+  negative after costs** (persistence/momentum/logistic edge ≈ −0.0002/event,
+  t ≈ −80 to −159); **no-trade (flat) wins**, so the gate blocks
+  (`beats_notrade=false`). This is the FI-2010/cost-aware result on real data:
+  naive 1-min directional signals don't survive costs. The transformer's bar is
+  now concrete and measured: **produce positive post-cost expectancy on this
+  exact OOS series.**
+
 **Not built yet (pass 2):**
 
-- **Bulk historical pull** at training scale (the downloader works; we have only
-  fetched a few verification days so far) + run the `eve_baselines` harness on
-  **real** Alpaca bars instead of synthetic.
+- **Forex**: Alpaca FX data returns **403 "not authorized for FX data"** on the
+  current plan (paid add-on). Pending: an alternate free source (Yahoo Finance)
+  or a plan upgrade.
 - **Transformer wrapper** (compact temporal encoder / PatchTST-style; CPU+MPS
-  smoke). Promotion rule now concretely enforceable: *it must beat the
-  `eve_baselines` winner on post-cost expectancy on the same OOS series.*
+  smoke) that must beat the `eve_baselines` winner after costs.
+- **Options** (later, by user request): do an **extended options-model
+  literature review first**, then expand features, then ingest.
 - **Advisory-only** predictions → paper → canary.
 
-Eve now has a **labeling scheme, the evaluation bar a model must clear, and a
-real (cached) ingest path**, but **no model and no live adapters yet** — by
-design.
+Eve now has a **labeling scheme, the evaluation bar a model must clear, a real
+(cached) ingest path, and a first real-data verdict**, but **no model and no
+live adapters yet** — by design.
 
 ---
 
@@ -200,15 +217,15 @@ eve:  paper_ok=false canary_ok=false live_ok=false
   signals and (b) a live maker canary — not more pricing work.
 - **Arbitrage** is settled: phantom-dominated, real edge trivial; parked behind
   the validator.
-- **Eve** now has cost-aware labels, a post-cost baseline bar (`eve_labels`,
-  `eve_baselines`), and a cached real-data ingest (`eve_ingest`, verified live);
-  the next step is a **bulk historical pull** and running the baselines on real
-  bars, then a transformer that must beat them.
+- **Eve** now has cost-aware labels, a post-cost baseline bar, a cached ingest,
+  and a **first real-data verdict** (crypto 1-min: no naive post-cost edge). The
+  next step is a transformer that must beat the no-trade baseline on that exact
+  series; data breadth (forex via an alt source, options later) feeds it.
 - **Verifier** exists in Adam-scoped form; the dual-engine version is the spine
   to build once Eve has a model worth gating.
 
 **Build order from here:** Adam live canary (execution truth) → full Verifier +
-Engine interfaces → ~~Eve baselines~~ ✓ → ~~Eve Alpaca ingest~~ ✓ → **bulk
-historical pull + baselines on real bars** (next) → Eve transformer (must beat
-the baseline winner after costs) → Eve advisory. Live trading only after replay
-+ canary + Verifier all pass.
+Engine interfaces → ~~Eve baselines~~ ✓ → ~~Eve Alpaca ingest~~ ✓ → ~~baselines
+on real bars~~ ✓ (crypto) → **forex via alt source + Eve transformer** (must beat
+the no-trade baseline after costs) → options (literature-first) → Eve advisory.
+Live trading only after replay + canary + Verifier all pass.

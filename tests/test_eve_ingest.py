@@ -3,13 +3,14 @@ from datetime import date
 
 import pytest
 
-from src.eve_data import EveLake
+from src.eve_data import EveLake, read_symbol_bars
 from src.eve_ingest import (
     AlpacaBarClient,
     AlpacaCreds,
     AlpacaIngestError,
     ResponseCache,
     alpaca_bar_to_norm_row,
+    bars_dataset,
     ingest_bars,
 )
 
@@ -97,8 +98,8 @@ def test_ingest_writes_normalized_partitions(lake, tmp_path):
     assert res.days_ingested == 2
     assert res.rows == 5
     assert res.api_calls == 2  # one page per day
-    # partition content is normalized AlpacaBar rows
-    part = lake.raw_partition("alpaca", "equity", "bars", "AAPL", date(2026, 6, 1))
+    # partition content is normalized AlpacaBar rows (timeframe-scoped dataset)
+    part = lake.raw_partition("alpaca", "equity", "bars-1min", "AAPL", date(2026, 6, 1))
     lines = (part / "bars.jsonl").read_text().strip().splitlines()
     assert len(lines) == 3
     first = json.loads(lines[0])
@@ -157,7 +158,7 @@ def test_empty_day_is_recorded_and_not_requeried(lake, tmp_path):
                       start="2026-06-01", end="2026-06-01", asset_class="equity")
     assert res.rows == 0
     assert res.days_ingested == 1  # empty marker written
-    part = lake.raw_partition("alpaca", "equity", "bars", "AAPL", date(2026, 6, 1))
+    part = lake.raw_partition("alpaca", "equity", "bars-1min", "AAPL", date(2026, 6, 1))
     assert (part / "manifest.json").exists()
     manifest = json.loads((part / "manifest.json").read_text())
     assert manifest["rows"] == 0
@@ -165,6 +166,37 @@ def test_empty_day_is_recorded_and_not_requeried(lake, tmp_path):
     res2 = ingest_bars(client, lake, symbol="AAPL", timeframe="1Min",
                        start="2026-06-01", end="2026-06-01", asset_class="equity")
     assert res2.days_skipped == 1 and res2.api_calls == 0
+
+
+def test_timeframes_do_not_collide_in_partitions(lake, tmp_path):
+    # Same symbol + same date at two timeframes must live in separate datasets.
+    transport = FakeAlpaca({("AAPL", "2026-06-01"): 3})
+    client = _make(transport, tmp_path)
+    ingest_bars(client, lake, symbol="AAPL", timeframe="1Min",
+                start="2026-06-01", end="2026-06-01", asset_class="equity")
+    ingest_bars(client, lake, symbol="AAPL", timeframe="1Day",
+                start="2026-06-01", end="2026-06-01", asset_class="equity")
+
+    minute = read_symbol_bars(lake, provider="alpaca", asset_class="equity",
+                              symbol="AAPL", dataset=bars_dataset("1Min"))
+    daily = read_symbol_bars(lake, provider="alpaca", asset_class="equity",
+                             symbol="AAPL", dataset=bars_dataset("1Day"))
+    assert len(minute) == 3 and len(daily) == 3
+    assert {b.timeframe for b in minute} == {"1Min"}
+    assert {b.timeframe for b in daily} == {"1Day"}
+
+
+def test_read_symbol_bars_round_trip_sorted(lake, tmp_path):
+    transport = FakeAlpaca({("BTC/USD", "2026-06-01"): 2, ("BTC/USD", "2026-06-02"): 2})
+    client = _make(transport, tmp_path)
+    ingest_bars(client, lake, symbol="BTC/USD", timeframe="1Min",
+                start="2026-06-01", end="2026-06-02", asset_class="crypto")
+    bars = read_symbol_bars(lake, provider="alpaca", asset_class="crypto",
+                            symbol="BTC/USD", dataset=bars_dataset("1Min"))
+    assert len(bars) == 4
+    assert [b.ts for b in bars] == sorted(b.ts for b in bars)
+    assert read_symbol_bars(lake, provider="alpaca", asset_class="crypto",
+                            symbol="NOPE", dataset=bars_dataset("1Min")) == []
 
 
 def test_request_key_is_param_sensitive_and_auth_independent():

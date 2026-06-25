@@ -319,6 +319,15 @@ class IngestResult:
         )
 
 
+def bars_dataset(timeframe: str) -> str:
+    """Partition family for a timeframe, e.g. '1Min' -> 'bars-1min'.
+
+    Timeframe is part of the partition path so 1Min and 1Day bars for the same
+    date never share (and overwrite/skip) one partition.
+    """
+    return f"bars-{timeframe.strip().lower()}"
+
+
 def _daterange(start: date, end: date) -> Iterator[date]:
     d = start
     while d <= end:
@@ -326,8 +335,8 @@ def _daterange(start: date, end: date) -> Iterator[date]:
         d += timedelta(days=1)
 
 
-def _partition_done(lake: EveLake, symbol: str, asset_class: str, day: date) -> bool:
-    part = lake.raw_partition("alpaca", asset_class, "bars", symbol, day)
+def _partition_done(lake: EveLake, symbol: str, asset_class: str, day: date, dataset: str) -> bool:
+    part = lake.raw_partition("alpaca", asset_class, dataset, symbol, day)
     return (part / "manifest.json").exists()
 
 
@@ -355,13 +364,14 @@ def ingest_bars(
         raise ValueError("end must be on or after start")
 
     days = list(_daterange(start_d, end_d))
+    dataset = bars_dataset(timeframe)
     hits0 = client.cache.stats.hits
     calls0 = client.api_calls
     ingested = skipped = rows = 0
     partitions: list[str] = []
 
     for day in days:
-        if not force and _partition_done(lake, symbol, asset_class, day):
+        if not force and _partition_done(lake, symbol, asset_class, day, dataset):
             skipped += 1
             continue
         day_start = f"{day.isoformat()}T00:00:00Z"
@@ -375,7 +385,7 @@ def ingest_bars(
         if not raw:
             # Nothing for this day (holiday/no trades); record an empty marker so
             # we don't re-query it. Write a zero-row manifest sentinel.
-            _write_empty_partition(lake, symbol, asset_class, day)
+            _write_empty_partition(lake, symbol, asset_class, day, dataset)
             ingested += 1
             continue
         bars = normalize_alpaca_bars(
@@ -384,7 +394,7 @@ def ingest_bars(
             feed=feed or ("iex" if asset_class != "crypto" else "alpaca"),
             timeframe=timeframe,
         )
-        manifest = write_jsonl_partition(bars, lake, partition_date=day)
+        manifest = write_jsonl_partition(bars, lake, partition_date=day, dataset=dataset)
         partitions.append(manifest.path)
         rows += manifest.rows
         ingested += 1
@@ -403,15 +413,15 @@ def ingest_bars(
     )
 
 
-def _write_empty_partition(lake: EveLake, symbol: str, asset_class: str, day: date) -> None:
-    part = lake.raw_partition("alpaca", asset_class, "bars", symbol, day)
+def _write_empty_partition(lake: EveLake, symbol: str, asset_class: str, day: date, dataset: str) -> None:
+    part = lake.raw_partition("alpaca", asset_class, dataset, symbol, day)
     part.mkdir(parents=True, exist_ok=True)
     (part / "bars.jsonl").write_text("", encoding="utf-8")
     manifest = LakeManifest(
         schema_version="eve-lake-v1",
         provider="alpaca",
         asset_class=asset_class,
-        dataset="bars",
+        dataset=dataset,
         symbol=symbol,
         partition_date=day.isoformat(),
         rows=0,
@@ -446,6 +456,13 @@ def cli() -> None:
     ap.add_argument("--max-per-min", type=float, default=180.0)
     ap.add_argument("--force", action="store_true", help="re-ingest even if partitions exist (uses cache)")
     args = ap.parse_args()
+
+    try:  # convenience: load .env so the CLI works without manual exports
+        from dotenv import load_dotenv
+
+        load_dotenv()
+    except ImportError:
+        pass
 
     creds = AlpacaCreds.from_env()
     if creds is None:

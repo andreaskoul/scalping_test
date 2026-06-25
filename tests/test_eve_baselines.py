@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 import pytest
 
-from src.eve_data import build_bar_sequences, normalize_alpaca_bars, write_sequence_dataset, chronological_split, EveLake
+from src.eve_data import build_bar_sequences, normalize_alpaca_bars, write_sequence_dataset, chronological_split, EveLake, write_jsonl_partition
 from src.eve_labels import CostModel, FLAT
 from src.eve_baselines import (
     LogisticBaseline,
@@ -11,6 +11,7 @@ from src.eve_baselines import (
     PersistenceBaseline,
     WalkForwardResult,
     build_report,
+    build_report_from_lake,
     evaluate_result,
     load_samples_from_dataset,
     walk_forward,
@@ -129,6 +130,26 @@ def test_empty_samples_report_is_safe():
     assert report.best_name in {"no_trade", "persistence", "momentum_rule", "logistic"}
     assert not report.best_beats_notrade
     assert all(m.n == 0 for m in report.metrics)
+
+
+def test_build_report_from_lake_reads_real_partitions(tmp_path):
+    # Write AR(1) bars to the lake as timeframe-scoped partitions, then verdict.
+    bars = _ar1_bars(600, phi=0.6, noise=0.004, seed=4)
+    lake = EveLake(tmp_path / "lake")
+    # group by day and write each as its own partition (mirrors ingest)
+    by_day: dict[str, list] = {}
+    for b in bars:
+        by_day.setdefault(b.ts[:10], []).append(b)
+    for day, day_bars in by_day.items():
+        write_jsonl_partition(day_bars, lake, partition_date=day, dataset="bars-1min")
+
+    report, n_bars = build_report_from_lake(
+        lake, symbol="BTC/USD", asset_class="crypto", timeframe="1Min",
+        window=8, horizon=1, n_folds=4, min_train=100,
+    )
+    assert n_bars == 600
+    assert report.machine_line().startswith("eve_baseline:")
+    assert sum(report.label_dist.values()) > 0
 
 
 def test_round_trip_through_lake_dataset(tmp_path):

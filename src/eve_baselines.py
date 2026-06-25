@@ -34,7 +34,7 @@ from typing import Any, Sequence
 import numpy as np
 
 from . import stats as _stats
-from .eve_data import EveSequenceSample
+from .eve_data import EveLake, EveSequenceSample, build_bar_sequences, read_symbol_bars
 from .eve_labels import (
     DOWN,
     FLAT,
@@ -497,6 +497,39 @@ def load_samples_from_dataset(path: str | Path) -> list[EveSequenceSample]:
     return out
 
 
+def build_report_from_lake(
+    lake: EveLake,
+    *,
+    symbol: str,
+    asset_class: str,
+    timeframe: str = "1Min",
+    provider: str = "alpaca",
+    window: int = 16,
+    horizon: int = 1,
+    cost_model: CostModel | None = None,
+    n_folds: int = 5,
+    min_train: int = 200,
+    seed: int = 0,
+) -> "tuple[EveBaselineReport, int]":
+    """Load one symbol's real bars from the lake and run the baseline verdict.
+
+    Returns the report and the number of bars read. This is the bridge from
+    `eve_ingest` (real Alpaca bars on disk) to the post-cost baseline bar, so
+    the baselines run on real data instead of synthetic AR(1) series.
+    """
+    from .eve_ingest import bars_dataset
+
+    bars = read_symbol_bars(
+        lake, provider=provider, asset_class=asset_class, symbol=symbol,
+        dataset=bars_dataset(timeframe),
+    )
+    samples = build_bar_sequences(bars, window=window, horizon=horizon, threshold=0.0)
+    report = build_report(
+        samples, cost_model=cost_model, n_folds=n_folds, min_train=min_train, seed=seed
+    )
+    return report, len(bars)
+
+
 def _print_human(report: EveBaselineReport) -> None:
     print("\n=== Eve Baseline Verdict (post-cost walk-forward) ===")
     print(f"Round-trip cost:  {report.cost * 1e4:.2f} bps  | folds: {report.n_folds}")
@@ -521,7 +554,14 @@ def cli() -> None:
     import argparse
 
     ap = argparse.ArgumentParser(description="Eve baseline post-cost walk-forward verdict")
-    ap.add_argument("dataset", help="lake dataset dir with train/val/test.jsonl")
+    src = ap.add_mutually_exclusive_group(required=True)
+    src.add_argument("--dataset", help="lake dataset dir with train/val/test.jsonl")
+    src.add_argument("--lake-symbol", help="run on real lake bars for this symbol, e.g. 'BTC/USD'")
+    ap.add_argument("--asset-class", choices=["equity", "crypto"], help="required with --lake-symbol")
+    ap.add_argument("--lake", default=None, help="lake root (default $EVE_LAKE_DIR or data/lake)")
+    ap.add_argument("--timeframe", default="1Min", help="bar timeframe for --lake-symbol")
+    ap.add_argument("--window", type=int, default=16)
+    ap.add_argument("--horizon", type=int, default=1)
     ap.add_argument("--fee-bps", type=float, default=0.0)
     ap.add_argument("--half-spread-bps", type=float, default=1.0)
     ap.add_argument("--slippage-bps", type=float, default=0.5)
@@ -531,15 +571,26 @@ def cli() -> None:
     ap.add_argument("--json", action="store_true", help="emit JSON instead of a table")
     args = ap.parse_args()
 
-    samples = load_samples_from_dataset(args.dataset)
     cm = CostModel(
         taker_fee_bps=args.fee_bps,
         half_spread_bps=args.half_spread_bps,
         slippage_bps=args.slippage_bps,
     )
-    report = build_report(
-        samples, cost_model=cm, n_folds=args.folds, min_train=args.min_train, seed=args.seed
-    )
+    if args.lake_symbol:
+        if not args.asset_class:
+            raise SystemExit("--asset-class is required with --lake-symbol")
+        lake = EveLake(Path(args.lake)) if args.lake else EveLake.from_env()
+        report, n_bars = build_report_from_lake(
+            lake, symbol=args.lake_symbol, asset_class=args.asset_class,
+            timeframe=args.timeframe, window=args.window, horizon=args.horizon, cost_model=cm,
+            n_folds=args.folds, min_train=args.min_train, seed=args.seed,
+        )
+        print(f"# {args.lake_symbol} [{args.asset_class}] {args.timeframe} {n_bars} bars, window={args.window} horizon={args.horizon}")
+    else:
+        samples = load_samples_from_dataset(args.dataset)
+        report = build_report(
+            samples, cost_model=cm, n_folds=args.folds, min_train=args.min_train, seed=args.seed
+        )
     if args.json:
         print(report.to_json())
     else:
