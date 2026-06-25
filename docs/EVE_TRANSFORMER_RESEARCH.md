@@ -182,3 +182,30 @@ The first code slice should not train a transformer yet. It should create the su
 5. Keep runtime trading behavior unchanged.
 
 Once this is stable, the next slice can add a small PyTorch/MPS model wrapper and a dataset builder.
+
+## Implementation Status (2026-06-25)
+
+Substrate and the evaluation bar are in place; the model is not.
+
+- **Done — lake substrate** (`src/eve_data.py`): partitioning, Alpaca-bar
+  normalization, leakage-safe sequence building, chronological split, manifests,
+  device selection. Pure helpers run without alpaca-py or torch.
+- **Done — cost-aware labels** (`src/eve_labels.py`): `CostModel` and the
+  production-adjacent label from the "First Labels" section above — *future
+  tradable edge after fees and slippage with an explicit no-trade class*. The
+  no-trade boundary is the round-trip cost (cost-aware execution filter; de
+  Prado triple-barrier lineage). `post_cost_pnl` charges the same cost.
+- **Done — baselines + post-cost walk-forward** (`src/eve_baselines.py`):
+  the "Training Gates" baseline set (no-trade, last-value/no-change, logistic
+  regression, and a transparent momentum rule standing in for the current rule
+  stack, since Adam's rule stack is Polymarket-specific and does not apply to
+  Eve's broad bars). Anchored walk-forward, scored on **post-cost expectancy**
+  with block-bootstrap CI / HAC t / Deflated Sharpe from `src/stats.py`. This is
+  the concrete realization of the gate *"the transformer must beat simple
+  baselines after costs."*
+- **Pending — real Alpaca ingest**: the batch downloader (pagination/backoff/
+  checkpointing). Baselines have so far been validated on synthetic AR(1) bars;
+  they need real bars next.
+- **Pending — transformer wrapper, calibration, advisory consumption** (Stages
+  1–5). A transformer is only worth building once it is run against the
+  `eve_baselines` winner on the same out-of-sample, post-cost series.
