@@ -1,11 +1,12 @@
 # Adam & Eve — Goals, Literature, and Status
 
-_Analytical summary. Last updated 2026-06-27 (Eve transformer built + trained on
-MPS; it does **not** beat the no-trade baseline after costs — as the literature
-predicts. Adam at 280 captured / 20 resolved signals. 237 tests passing.)_
+_Analytical summary. Last updated 2026-06-27 (Eve **ensemble** built — transformer
+prediction → direct-RL portfolio allocation — and validated on real equities:
+the allocator works, the predictor has no edge, so the ensemble ≈ beta. Adam at
+280 captured / 23 resolved. 248 tests passing.)_
 
-_See also `docs/EVE_SHARPE_LITERATURE.md` — critically-assessed survey of the
-highest-Sharpe models & most-starred finance ML repos._
+_See also `docs/EVE_SHARPE_LITERATURE.md` (highest-Sharpe survey) and
+`docs/EVE_ENSEMBLE.md` (the transformer+RL ensemble design & results)._
 
 This repo is becoming **two sibling trading engines behind one validation spine**:
 
@@ -101,10 +102,10 @@ statistical gates — never on raw backtest means.
 
 **Verdict refresh (2026-06-27, paper capture restarted):**
 
-- Capture now holds **280 model signals**, but only **20 are on resolved
-  markets** (the rest are recent/still-open). Re-running `adam_report` on a
-  snapshot: taker fee-incl edge **+0.094/event but t=1.04 (<2)**, CI95 spans 0
-  [−0.107, +0.331], Brier **0.134 vs 0.247** no-skill (well-calibrated).
+- Capture holds **280 model signals**; **23 are on resolved markets** (climbing
+  as markets settle: 20→23 within the session). `adam_report` on a snapshot:
+  taker fee-incl edge **+0.090/event but t=1.08 (<2)**, CI95 spans 0
+  [−0.124, +0.273], Brier **0.133 vs 0.246** no-skill (well-calibrated).
   `paper_ok=False`, blocked by n<30, edge t<2, edge@5s. **Same character as the
   n=19 read at session start: calibrated pricing, no significant post-cost edge
   yet.** Resolution is wall-clock-bound — the capture keeps running.
@@ -199,11 +200,26 @@ statistical gates — never on raw backtest means.
   post-cost edge. The lever is breadth / microstructure features, not a fancier
   sequence model (see `docs/EVE_SHARPE_LITERATURE.md`).
 
+- **Ensemble — transformer prediction + RL portfolio optimization**
+  (`src/eve_portfolio.py`, `src/eve_rl.py`, `src/eve_ensemble.py`; see
+  `docs/EVE_ENSEMBLE.md`). Direct/recurrent RL allocator on the **Differential
+  Sharpe Ratio** net of costs (Moody & Saffell 1998) → dollar-neutral
+  leverage-capped book; chained behind the transformer's cross-sectional score;
+  nested leakage-safe walk-forward; judged on **Deflated** Sharpe.
+  **Real-equity results (30 large-caps, daily, 2016–2026, 5 bps):** the RL
+  allocator on transparent momentum/vol signals is market-neutral Sharpe **0.62**
+  (beats the momentum long-short −0.38, doesn't beat beta 0.94, DSR 0.27). The
+  **transformer→RL ensemble is Sharpe ≈ 0.04** because the transformer's
+  cross-sectional signal is edgeless (transformer-LS −0.67); the allocator
+  correctly goes flat on a useless signal rather than losing money — **the
+  allocator works; the predictor is the bottleneck.**
+
 **Not built yet (pass 2):**
 
-- **Cross-sectional / breadth experiment** (the literature's actual edge regime):
-  many daily equity symbols → ranking labels → GBDT vs transformer under the
-  post-cost harness. GBDT is the baseline to beat (qlib reality).
+- **A prediction lane with real edge** (the actual bottleneck): more **breadth**
+  (hundreds of names), a **GBDT** lane (qlib's winner; the baseline to beat), and
+  genuine **microstructure** features for intraday. Architecture is ready; signal
+  is missing.
 - **Options** (later, by user request): do an **extended options-model
   literature review first**, then expand features, then ingest.
 - **Advisory-only** predictions → paper → canary.
@@ -264,8 +280,8 @@ eve:  paper_ok=false canary_ok=false live_ok=false
 
 **Build order from here:** Adam live canary (execution truth) → full Verifier +
 Engine interfaces → ~~Eve baselines~~ ✓ → ~~Eve Alpaca ingest~~ ✓ → ~~baselines
-on real bars~~ ✓ (crypto + Yahoo FX) → ~~Eve transformer~~ ✓ (built + trained;
-**no post-cost edge on OHLCV bars** — expected) → **breadth/cross-sectional +
-microstructure features** (the literature's real edge regime) → options
-(literature-first) → Eve advisory. Live trading only after replay + canary +
-Verifier all pass.
+on real bars~~ ✓ (crypto + Yahoo FX) → ~~Eve transformer~~ ✓ → ~~transformer+RL
+ensemble~~ ✓ (allocator works, predictor has no edge → ≈ beta) → **a prediction
+lane with real edge** (breadth + GBDT + microstructure — the actual bottleneck) →
+options (literature-first) → Eve advisory. Live trading only after replay +
+canary + Verifier all pass.
