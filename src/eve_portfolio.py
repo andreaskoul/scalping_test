@@ -209,6 +209,25 @@ def equal_weights(panel: Panel) -> np.ndarray:
     return np.full((T, N), 1.0 / N)
 
 
+def topk_long_short_weights(scores: np.ndarray, k: int, *, leverage: float = 1.0) -> np.ndarray:
+    """Dollar-neutral book: long the top-k by score, short the bottom-k.
+
+    qlib's TopkDropout family. ``scores`` is (T, N); gross leverage is normalized
+    to ``leverage`` and the book is dollar-neutral.
+    """
+    T, N = scores.shape
+    k = max(1, min(k, N // 2))
+    W = np.zeros((T, N))
+    for t in range(T):
+        order = np.argsort(scores[t])
+        W[t, order[-k:]] = 1.0
+        W[t, order[:k]] = -1.0
+        gross = np.abs(W[t]).sum()
+        if gross > 0:
+            W[t] *= leverage / gross
+    return W
+
+
 def long_short_weights(panel: Panel, *, signal_feature: int = 1, top_frac: float = 0.3,
                        leverage: float = 1.0) -> np.ndarray:
     """Dollar-neutral long–short book from one cross-sectional signal feature.
@@ -307,6 +326,8 @@ class PortfolioReport:
     best_name: str
     best_beats_baselines: bool
     gate_reasons: list[str] = field(default_factory=list)
+    net_returns: dict[str, list[float]] = field(default_factory=dict)
+    pbo: float = float("nan")  # probability of backtest overfitting (CSCV)
 
     def machine_line(self) -> str:
         best = next((m for m in self.metrics if m.name == self.best_name), None)
@@ -331,6 +352,7 @@ def walk_forward_portfolio(
     cost: float = 0.0005,
     n_folds: int = 4,
     min_train: int = 252,
+    embargo: int = 0,
     seed: int = 0,
 ) -> PortfolioReport:
     """Anchored walk-forward: train past, evaluate next block, concatenate OOS.
@@ -351,7 +373,10 @@ def walk_forward_portfolio(
             lo, hi = edges[i], edges[i + 1]
             if hi <= lo:
                 continue
-            train, test = _slice_panel(panel, 0, lo), _slice_panel(panel, lo, hi)
+            # Embargo: purge the last `embargo` train rows so a label whose
+            # horizon overlaps the test block can't leak into training.
+            train = _slice_panel(panel, 0, max(1, lo - embargo))
+            test = _slice_panel(panel, lo, hi)
             folds_used += 1
             for name, strat in strategies.items():
                 if callable(strat):
@@ -383,9 +408,17 @@ def walk_forward_portfolio(
     if not (best.ci_lo > 0):
         reasons.append("ci95_includes_0")
 
+    # Probability of backtest overfitting across the competing strategies (CSCV).
+    lengths = {len(v) for v in nets.values()}
+    pbo = float("nan")
+    if len(lengths) == 1 and lengths != {0} and len(nets) >= 2:
+        matrix = np.column_stack([np.asarray(nets[name]) for name in strategies])
+        pbo = _stats.probability_of_backtest_overfitting(matrix)
+
     return PortfolioReport(
         cost=cost, n_folds=folds_used, metrics=metrics,
         best_name=best.name, best_beats_baselines=not reasons, gate_reasons=reasons,
+        net_returns={name: nets[name] for name in strategies}, pbo=pbo,
     )
 
 
@@ -398,6 +431,8 @@ def print_portfolio_report(report: PortfolioReport) -> None:
         print(f"{m.name:<14}{m.n:>6}{m.ann_return:>9.3f}{m.ann_vol:>9.3f}{m.sharpe:>9.2f}"
               f"{m.deflated_sharpe:>7.2f}{m.t_stat:>7.2f}{m.avg_turnover:>8.2f}")
     print()
+    if np.isfinite(report.pbo):
+        print(f"PBO (prob. backtest overfitting, CSCV): {report.pbo:.2f}  (lower is better; <0.5 robust)")
     if report.gate_reasons:
         print(f"best '{report.best_name}' blocked by: {', '.join(report.gate_reasons)}")
     print(report.machine_line())

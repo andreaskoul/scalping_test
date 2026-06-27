@@ -153,6 +153,39 @@ def deflated_sharpe_ratio(
     return float(_sps.norm.cdf(z))
 
 
+def probability_of_backtest_overfitting(
+    returns_matrix: np.ndarray, *, n_blocks: int = 10
+) -> float:
+    """Probability of Backtest Overfitting via CSCV (Bailey et al. 2017).
+
+    ``returns_matrix`` is (T, S): per-period returns for S competing strategies /
+    configs. CSCV splits the T periods into ``n_blocks`` blocks, takes every
+    in-sample/out-of-sample partition into equal halves, picks the best strategy
+    in-sample (by Sharpe), and measures how often it lands below the OOS median.
+    PBO near 0 = selection is robust; near 0.5+ = the "winner" is likely overfit.
+    """
+    from itertools import combinations
+
+    R = np.asarray(returns_matrix, dtype=float)
+    if R.ndim != 2 or R.shape[1] < 2 or R.shape[0] < n_blocks:
+        return float("nan")
+    T, S = R.shape
+    blocks = np.array_split(np.arange(T), n_blocks)
+    half = n_blocks // 2
+    logits: list[float] = []
+    for is_combo in combinations(range(n_blocks), half):
+        is_rows = np.concatenate([blocks[b] for b in is_combo])
+        oos_rows = np.concatenate([blocks[b] for b in range(n_blocks) if b not in is_combo])
+        is_perf = np.array([per_obs_sharpe(R[is_rows, s]) for s in range(S)])
+        oos_perf = np.array([per_obs_sharpe(R[oos_rows, s]) for s in range(S)])
+        best = int(np.argmax(is_perf))
+        rank = (oos_perf <= oos_perf[best]).sum() / S  # relative OOS rank in (0,1]
+        rank = min(max(rank, 1.0 / (S + 1)), 1.0 - 1.0 / (S + 1))
+        logits.append(math.log(rank / (1.0 - rank)))
+    arr = np.asarray(logits)
+    return float((arr <= 0).mean()) if arr.size else float("nan")
+
+
 def per_obs_sharpe(values: np.ndarray | list[float]) -> float:
     """Per-observation Sharpe (mean/std) of a return series; 0 if degenerate."""
     arr = np.asarray(list(values), dtype=float)

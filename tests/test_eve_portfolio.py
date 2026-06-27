@@ -10,8 +10,10 @@ from src.eve_portfolio import (
     long_short_weights,
     portfolio_metrics,
     simulate,
+    topk_long_short_weights,
     walk_forward_portfolio,
 )
+from src.stats import probability_of_backtest_overfitting
 
 
 def _synthetic_closes(n_days=400, n_sym=8, seed=0):
@@ -74,6 +76,24 @@ def test_portfolio_metrics_positive_series():
     m = portfolio_metrics("x", r, n_trials=3)
     assert m.sharpe > 0
     assert 0.0 <= m.deflated_sharpe <= 1.0
+
+
+def test_topk_long_short_dollar_neutral():
+    scores = np.array([[3.0, 1.0, 2.0, -1.0, 0.5, -2.0]])
+    W = topk_long_short_weights(scores, k=2, leverage=1.0)
+    assert abs(W[0].sum()) < 1e-9
+    assert np.abs(W[0]).sum() == pytest.approx(1.0)
+    # top-2 (values 3,2 at idx 0,2) long; bottom-2 (-2,-1 at idx5,3) short
+    assert W[0, 0] > 0 and W[0, 2] > 0 and W[0, 5] < 0 and W[0, 3] < 0
+
+
+def test_pbo_high_for_noise_low_for_real_winner():
+    rng = np.random.default_rng(0)
+    noise = rng.normal(0, 0.01, size=(600, 6))          # no real winner
+    assert probability_of_backtest_overfitting(noise, n_blocks=8) > 0.3
+    real = rng.normal(0, 0.01, size=(600, 6))
+    real[:, 0] += 0.004                                  # strategy 0 truly best IS & OOS
+    assert probability_of_backtest_overfitting(real, n_blocks=8) < 0.2
 
 
 def test_walk_forward_baselines_only_runs():
