@@ -5,8 +5,12 @@ prediction → direct-RL portfolio allocation — and validated on real equities
 the allocator works, the predictor has no edge, so the ensemble ≈ beta. Adam at
 280 captured / 23 resolved. 248 tests passing.)_
 
-_See also `docs/EVE_SHARPE_LITERATURE.md` (highest-Sharpe survey) and
-`docs/EVE_ENSEMBLE.md` (the transformer+RL ensemble design & results)._
+_See also `docs/EVE_SHARPE_LITERATURE.md` (highest-Sharpe survey),
+`docs/EVE_ENSEMBLE.md` (transformer+RL ensemble), and **`docs/EVE_ALPHA_RESULTS.md`**
+(the qlib recipe A–E on 472 S&P names: GBDT has real **gross** alpha — Sharpe 0.83,
+PBO≈0 — but it's short-horizon and **nets negative at retail costs**; break-even
+≈2 bps/side. The wall is execution cost, not model quality; a deflated post-cost
+Sharpe of 4 is not attainable honestly)._
 
 This repo is becoming **two sibling trading engines behind one validation spine**:
 
