@@ -335,8 +335,10 @@ def _daterange(start: date, end: date) -> Iterator[date]:
         d += timedelta(days=1)
 
 
-def _partition_done(lake: EveLake, symbol: str, asset_class: str, day: date, dataset: str) -> bool:
-    part = lake.raw_partition("alpaca", asset_class, dataset, symbol, day)
+def _partition_done(
+    lake: EveLake, symbol: str, asset_class: str, day: date, dataset: str, provider: str = "alpaca"
+) -> bool:
+    part = lake.raw_partition(provider, asset_class, dataset, symbol, day)
     return (part / "manifest.json").exists()
 
 
@@ -413,13 +415,15 @@ def ingest_bars(
     )
 
 
-def _write_empty_partition(lake: EveLake, symbol: str, asset_class: str, day: date, dataset: str) -> None:
-    part = lake.raw_partition("alpaca", asset_class, dataset, symbol, day)
+def _write_empty_partition(
+    lake: EveLake, symbol: str, asset_class: str, day: date, dataset: str, provider: str = "alpaca"
+) -> None:
+    part = lake.raw_partition(provider, asset_class, dataset, symbol, day)
     part.mkdir(parents=True, exist_ok=True)
     (part / "bars.jsonl").write_text("", encoding="utf-8")
     manifest = LakeManifest(
         schema_version="eve-lake-v1",
-        provider="alpaca",
+        provider=provider,
         asset_class=asset_class,
         dataset=dataset,
         symbol=symbol,

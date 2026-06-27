@@ -138,22 +138,24 @@ def normalize_alpaca_bars(
     asset_class: str,
     feed: str = "unknown",
     timeframe: str = "unknown",
+    provider: str = "alpaca",
 ) -> list[AlpacaBar]:
-    """Normalize Alpaca bar-like mappings into deterministic records.
+    """Normalize bar-like mappings into deterministic records.
 
-    Accepts dict-like rows from alpaca-py DataFrame exports, test fixtures, or
-    future downloader code. Required fields are symbol, timestamp, OHLC, and
-    volume. Extra fields are ignored.
+    Accepts dict-like rows from alpaca-py DataFrame exports, test fixtures, the
+    Alpaca downloader, or other providers (``provider`` overrides the source
+    tag, e.g. "yahoo"). Required fields are symbol, timestamp, OHLC, and volume.
+    Extra fields are ignored.
     """
     out: list[AlpacaBar] = []
     for row in rows:
         symbol = str(_first_present(row, "symbol", "tic") or "").strip()
         ts = _normalize_ts(_first_present(row, "timestamp", "ts", "date"))
         if not symbol or not ts:
-            raise ValueError("alpaca bar row requires symbol and timestamp")
+            raise ValueError("bar row requires symbol and timestamp")
         out.append(
             AlpacaBar(
-                provider="alpaca",
+                provider=provider,
                 asset_class=asset_class,
                 symbol=symbol,
                 ts=ts,

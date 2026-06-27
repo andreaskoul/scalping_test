@@ -1,7 +1,8 @@
 # Adam & Eve — Goals, Literature, and Status
 
-_Analytical summary. Last updated 2026-06-25 (Eve ran its first **real-data**
-baseline verdict on ~280k Alpaca crypto 1-min bars; 229 tests passing)._
+_Analytical summary. Last updated 2026-06-25 (Eve ran real-data baseline
+verdicts across **two providers / two asset classes** — Alpaca crypto 1-min and
+Yahoo FX 1h; same finding both ways; 233 tests passing)._
 
 This repo is becoming **two sibling trading engines behind one validation spine**:
 
@@ -147,23 +148,27 @@ statistical gates — never on raw backtest means.
   `eve_baselines.build_report_from_lake`): partitions are **timeframe-scoped**
   (`bars-1min` vs `bars-1day`, so timeframes never collide on a shared date),
   and the baseline verdict runs straight off real lake bars.
+- **Yahoo Finance ingest** (`src/eve_yahoo.py`): free source for **forex**
+  (Alpaca FX returns **403 "not authorized for FX data"** on the current plan —
+  it's a paid add-on) and other asset classes. Same chart endpoint shape, same
+  lake schema (`provider="yahoo"`), and the **same two idempotency layers**
+  (partition skip + response cache) as the Alpaca path; no auth (browser
+  User-Agent only). Verified live.
 
-**Honest first real-data finding (crypto 1-min):**
+**Honest real-data finding — consistent across providers & asset classes:**
 
-- Pulled **BTC/USD (164k)** + **ETH/USD (114k)** Alpaca 1-min bars (Mar–Jun
-  2026). On both, with a 3 bps round-trip cost, **every directional baseline is
-  negative after costs** (persistence/momentum/logistic edge ≈ −0.0002/event,
-  t ≈ −80 to −159); **no-trade (flat) wins**, so the gate blocks
-  (`beats_notrade=false`). This is the FI-2010/cost-aware result on real data:
-  naive 1-min directional signals don't survive costs. The transformer's bar is
-  now concrete and measured: **produce positive post-cost expectancy on this
-  exact OOS series.**
+- **Crypto 1-min (Alpaca):** BTC/USD (164k) + ETH/USD (114k), Mar–Jun 2026.
+- **Forex 1h (Yahoo):** EUR/USD, GBP/USD, USD/JPY (~12k each), 2024–2026.
+- In **all five**, with a 3 bps round-trip cost, **every directional baseline is
+  negative after costs** (edge ≈ −0.0002/event, t ≈ −22 to −159); **no-trade
+  (flat) wins**, gate blocks (`beats_notrade=false`). This is the FI-2010/
+  cost-aware result reproduced on real data, twice over: naive intraday
+  directional signals don't survive costs. The transformer's bar is now concrete
+  and measured: **produce positive post-cost expectancy on these exact OOS
+  series.**
 
 **Not built yet (pass 2):**
 
-- **Forex**: Alpaca FX data returns **403 "not authorized for FX data"** on the
-  current plan (paid add-on). Pending: an alternate free source (Yahoo Finance)
-  or a plan upgrade.
 - **Transformer wrapper** (compact temporal encoder / PatchTST-style; CPU+MPS
   smoke) that must beat the `eve_baselines` winner after costs.
 - **Options** (later, by user request): do an **extended options-model
@@ -226,6 +231,6 @@ eve:  paper_ok=false canary_ok=false live_ok=false
 
 **Build order from here:** Adam live canary (execution truth) → full Verifier +
 Engine interfaces → ~~Eve baselines~~ ✓ → ~~Eve Alpaca ingest~~ ✓ → ~~baselines
-on real bars~~ ✓ (crypto) → **forex via alt source + Eve transformer** (must beat
-the no-trade baseline after costs) → options (literature-first) → Eve advisory.
+on real bars~~ ✓ (crypto + Yahoo FX) → **Eve transformer** (must beat the
+no-trade baseline after costs) → options (literature-first) → Eve advisory.
 Live trading only after replay + canary + Verifier all pass.

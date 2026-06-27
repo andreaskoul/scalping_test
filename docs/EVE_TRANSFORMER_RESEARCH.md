@@ -212,9 +212,20 @@ Substrate and the evaluation bar are in place; the model is not.
   and a persistent per-request response cache. Transport/sleep are injectable so
   tests need no credentials. Verified live; pull is so far only a few
   verification days.
-- **Pending — bulk historical pull + baselines on real bars**: run the cached
-  ingest at training scale, then the `eve_baselines` harness on real Alpaca data
-  (so far the baselines are validated on synthetic AR(1) bars).
+- **Done — bulk pull + real-data baselines**: pulled Alpaca crypto 1-min
+  (BTC/USD 164k, ETH/USD 114k) and ran `eve_baselines` on them. Result: no naive
+  directional baseline beats no-trade after a 3 bps round-trip cost — the
+  cost-aware/FI-2010 finding on real data.
+- **Done — Yahoo Finance ingest** (`src/eve_yahoo.py`): free **forex** source
+  because Alpaca FX returns `403 not authorized for FX data` (paid add-on). Same
+  lake schema (`provider="yahoo"`), cache, and partition idempotency as the
+  Alpaca path; no auth (browser User-Agent). Pulled EUR/USD, GBP/USD, USD/JPY 1h
+  (~12k each); same no-edge finding as crypto. Yahoo intraday history is
+  range-limited (≈730d for 1h); daily goes back decades.
+- **Pending — options** (user request): do an **extended options-model
+  literature review first** (vol surface, IV/greeks features, options
+  microstructure), expand features, then ingest. Do not ingest-first like
+  crypto/forex.
 - **Pending — transformer wrapper, calibration, advisory consumption** (Stages
   1–5). A transformer is only worth building once it is run against the
   `eve_baselines` winner on the same out-of-sample, post-cost series.
