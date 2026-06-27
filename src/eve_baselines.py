@@ -268,7 +268,10 @@ def walk_forward(
                 frs[b.name].extend(float(s.future_return) for s in test)
                 proba_fn = getattr(b, "predict_proba", None)
                 if proba_fn is not None and probs[b.name] is not None:
-                    probs[b.name].extend(proba_fn(test).tolist())
+                    proba = proba_fn(test)
+                    if hasattr(proba, "tolist"):  # numpy array or torch tensor
+                        proba = proba.tolist()
+                    probs[b.name].extend(proba)
                 else:
                     probs[b.name] = None
 
@@ -432,17 +435,21 @@ def build_report(
     n_folds: int = 5,
     min_train: int = 50,
     seed: int = 0,
+    extra_models: Sequence[Any] | None = None,
 ) -> EveBaselineReport:
     """Run all baselines walk-forward and score them on post-cost expectancy.
 
     The "winner" is the highest post-cost expectancy. It only counts as
     beating no-trade if its expectancy is positive, its 95% CI excludes 0, and
     its HAC t-stat clears ``_T_STAT_MIN`` — the same discipline as Adam's
-    verdict. A transformer later must beat this winner on the same series.
+    verdict. ``extra_models`` (e.g. the Eve transformer) are evaluated on the
+    *same* out-of-sample series as the baselines, so the comparison is fair.
     """
     cm = cost_model or CostModel()
     cost = cm.round_trip()
-    baselines = default_baselines()
+    baselines = list(default_baselines())
+    if extra_models:
+        baselines.extend(extra_models)
     results = walk_forward(samples, baselines, cost, n_folds=n_folds, min_train=min_train)
     n_trials = len(baselines)
     metrics = [evaluate_result(r, cost, n_trials=n_trials, seed=seed) for r in results]
@@ -510,12 +517,14 @@ def build_report_from_lake(
     n_folds: int = 5,
     min_train: int = 200,
     seed: int = 0,
+    extra_models: Sequence[Any] | None = None,
 ) -> "tuple[EveBaselineReport, int]":
     """Load one symbol's real bars from the lake and run the baseline verdict.
 
     Returns the report and the number of bars read. This is the bridge from
     `eve_ingest` (real Alpaca bars on disk) to the post-cost baseline bar, so
-    the baselines run on real data instead of synthetic AR(1) series.
+    the baselines (and any ``extra_models`` like the transformer) run on real
+    data instead of synthetic AR(1) series.
     """
     from .eve_ingest import bars_dataset
 
@@ -525,7 +534,8 @@ def build_report_from_lake(
     )
     samples = build_bar_sequences(bars, window=window, horizon=horizon, threshold=0.0)
     report = build_report(
-        samples, cost_model=cost_model, n_folds=n_folds, min_train=min_train, seed=seed
+        samples, cost_model=cost_model, n_folds=n_folds, min_train=min_train, seed=seed,
+        extra_models=extra_models,
     )
     return report, len(bars)
 

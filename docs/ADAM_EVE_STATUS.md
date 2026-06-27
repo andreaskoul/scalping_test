@@ -1,8 +1,11 @@
 # Adam & Eve — Goals, Literature, and Status
 
-_Analytical summary. Last updated 2026-06-25 (Eve ran real-data baseline
-verdicts across **two providers / two asset classes** — Alpaca crypto 1-min and
-Yahoo FX 1h; same finding both ways; 233 tests passing)._
+_Analytical summary. Last updated 2026-06-27 (Eve transformer built + trained on
+MPS; it does **not** beat the no-trade baseline after costs — as the literature
+predicts. Adam at 280 captured / 20 resolved signals. 237 tests passing.)_
+
+_See also `docs/EVE_SHARPE_LITERATURE.md` — critically-assessed survey of the
+highest-Sharpe models & most-starred finance ML repos._
 
 This repo is becoming **two sibling trading engines behind one validation spine**:
 
@@ -96,10 +99,20 @@ statistical gates — never on raw backtest means.
   statistically significant post-cost directional edge yet**, and the edge
   largely vanishes within 5 s.
 
+**Verdict refresh (2026-06-27, paper capture restarted):**
+
+- Capture now holds **280 model signals**, but only **20 are on resolved
+  markets** (the rest are recent/still-open). Re-running `adam_report` on a
+  snapshot: taker fee-incl edge **+0.094/event but t=1.04 (<2)**, CI95 spans 0
+  [−0.107, +0.331], Brier **0.134 vs 0.247** no-skill (well-calibrated).
+  `paper_ok=False`, blocked by n<30, edge t<2, edge@5s. **Same character as the
+  n=19 read at session start: calibrated pricing, no significant post-cost edge
+  yet.** Resolution is wall-clock-bound — the capture keeps running.
+
 **Pending for Adam:**
 
-- Accumulate **≥30 resolved model signals** (currently ~21; paper capture
-  running) for a full-power verdict.
+- Accumulate **≥30 resolved model signals** (20 resolved of 280 captured) for a
+  full-power verdict; backfill resolution as markets settle.
 - **Live canary**: tiny real post-only probes → the only source of true fill
   rate / adverse selection. Gated behind a separate approval.
 - Wire Adam behind the shared `Engine`/`Verifier` interface (pass 2).
@@ -167,10 +180,30 @@ statistical gates — never on raw backtest means.
   and measured: **produce positive post-cost expectancy on these exact OOS
   series.**
 
+- **Compact transformer** (`src/eve_transformer.py`): encoder-only, regularized
+  (small d_model, 2 layers, dropout + weight decay, learned positional emb),
+  trained with cross-entropy on cost-aware labels. Implements the baseline
+  `fit/predict/predict_proba` protocol so it drops into the **same** post-cost
+  walk-forward harness (`extra_models=`) and is judged on the identical OOS
+  series. torch is decoupled from numpy (features are native lists), so it runs
+  on torch 2.2 + numpy 2; trains on **MPS**.
+
+**First transformer result (honest, literature-predicted):**
+
+- Trained on MPS, 3-fold anchored walk-forward, 3 bps cost. On **BTC/USD 1-min**
+  it scores **−0.000185/event** (t=−117, cover 0.62) and on **EUR/USD 1h**
+  **−0.000107/event** (t=−16): **negative after costs, does not beat no-trade.**
+  Notably its **Brier is far better** (0.65 vs logistic's 1.04) — it is *better
+  calibrated* but calibration ≠ profit. This is exactly the TLOB/FI-2010/LOBCAST
+  caveat reproduced with our own model: OHLCV bars at this horizon/cost carry no
+  post-cost edge. The lever is breadth / microstructure features, not a fancier
+  sequence model (see `docs/EVE_SHARPE_LITERATURE.md`).
+
 **Not built yet (pass 2):**
 
-- **Transformer wrapper** (compact temporal encoder / PatchTST-style; CPU+MPS
-  smoke) that must beat the `eve_baselines` winner after costs.
+- **Cross-sectional / breadth experiment** (the literature's actual edge regime):
+  many daily equity symbols → ranking labels → GBDT vs transformer under the
+  post-cost harness. GBDT is the baseline to beat (qlib reality).
 - **Options** (later, by user request): do an **extended options-model
   literature review first**, then expand features, then ingest.
 - **Advisory-only** predictions → paper → canary.
@@ -231,6 +264,8 @@ eve:  paper_ok=false canary_ok=false live_ok=false
 
 **Build order from here:** Adam live canary (execution truth) → full Verifier +
 Engine interfaces → ~~Eve baselines~~ ✓ → ~~Eve Alpaca ingest~~ ✓ → ~~baselines
-on real bars~~ ✓ (crypto + Yahoo FX) → **Eve transformer** (must beat the
-no-trade baseline after costs) → options (literature-first) → Eve advisory.
-Live trading only after replay + canary + Verifier all pass.
+on real bars~~ ✓ (crypto + Yahoo FX) → ~~Eve transformer~~ ✓ (built + trained;
+**no post-cost edge on OHLCV bars** — expected) → **breadth/cross-sectional +
+microstructure features** (the literature's real edge regime) → options
+(literature-first) → Eve advisory. Live trading only after replay + canary +
+Verifier all pass.
