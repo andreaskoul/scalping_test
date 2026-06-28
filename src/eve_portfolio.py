@@ -228,6 +228,41 @@ def topk_long_short_weights(scores: np.ndarray, k: int, *, leverage: float = 1.0
     return W
 
 
+def aim_weights_from_scores(scores: np.ndarray, *, leverage: float = 1.0) -> np.ndarray:
+    """Continuous dollar-neutral 'aim' book proportional to cross-sectional score.
+
+    The Gârleanu-Pedersen aim portfolio: weight each name by its de-meaned score,
+    scaled to gross leverage. Smoother than a discrete top-k cutoff, which is what
+    partial adjustment wants to track.
+    """
+    s = scores - scores.mean(axis=1, keepdims=True)
+    denom = np.abs(s).sum(axis=1, keepdims=True) + 1e-12
+    return leverage * s / denom
+
+
+def partial_adjust_path(aim: np.ndarray, rate: float, fwd_returns: np.ndarray) -> np.ndarray:
+    """Gârleanu-Pedersen partial adjustment toward an aim portfolio.
+
+    Each step trade a fraction ``rate`` of the way from the (drifted) current book
+    to ``aim[t]``: ``pos += rate*(aim - pos)``. ``rate=1`` is a full daily rebalance
+    (max turnover); ``rate→0`` barely trades. The optimal rate trades alpha capture
+    against turnover cost when returns are predictable but decaying and costs are
+    linear (Gârleanu & Pedersen 2013). Drift matches :func:`simulate` so the
+    returned weights are the post-trade book and turnover is exactly
+    ``rate*|aim - drifted_prev|`` — no look-ahead (aim[t] uses only info ≤ t).
+    """
+    T, N = aim.shape
+    W = np.zeros((T, N))
+    pos = np.zeros(N)
+    for t in range(T):
+        pos = pos + rate * (aim[t] - pos)
+        W[t] = pos
+        gross = float(pos @ fwd_returns[t])
+        denom = 1.0 + gross
+        pos = (pos * (1.0 + fwd_returns[t])) / denom if denom > 1e-9 else pos.copy()
+    return W
+
+
 def long_short_weights(panel: Panel, *, signal_feature: int = 1, top_frac: float = 0.3,
                        leverage: float = 1.0) -> np.ndarray:
     """Dollar-neutral long–short book from one cross-sectional signal feature.

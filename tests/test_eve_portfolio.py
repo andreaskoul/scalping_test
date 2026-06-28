@@ -3,11 +3,13 @@ import pytest
 
 from src.eve_portfolio import (
     Panel,
+    aim_weights_from_scores,
     build_panel,
     cash_weights,
     differential_sharpe_series,
     equal_weights,
     long_short_weights,
+    partial_adjust_path,
     portfolio_metrics,
     simulate,
     topk_long_short_weights,
@@ -85,6 +87,27 @@ def test_topk_long_short_dollar_neutral():
     assert np.abs(W[0]).sum() == pytest.approx(1.0)
     # top-2 (values 3,2 at idx 0,2) long; bottom-2 (-2,-1 at idx5,3) short
     assert W[0, 0] > 0 and W[0, 2] > 0 and W[0, 5] < 0 and W[0, 3] < 0
+
+
+def test_aim_weights_dollar_neutral_and_levered():
+    scores = np.array([[2.0, -1.0, 0.5, -1.5], [1.0, 1.0, -1.0, -1.0]])
+    aim = aim_weights_from_scores(scores, leverage=1.0)
+    assert abs(aim[0].sum()) < 1e-9 and abs(aim[1].sum()) < 1e-9   # dollar neutral
+    assert np.abs(aim[0]).sum() == pytest.approx(1.0)              # gross leverage
+
+
+def test_partial_adjust_reduces_turnover():
+    rng = np.random.default_rng(0)
+    aim = rng.normal(0, 0.3, size=(200, 6))
+    aim -= aim.mean(axis=1, keepdims=True)
+    fwd = rng.normal(0, 0.01, size=(200, 6))
+    full = partial_adjust_path(aim, 1.0, fwd)
+    slow = partial_adjust_path(aim, 0.2, fwd)
+    # rate=1 tracks the aim exactly; rate<1 trades a fraction -> far less turnover.
+    assert np.allclose(full, aim)
+    to_full = np.abs(np.diff(full, axis=0)).sum()
+    to_slow = np.abs(np.diff(slow, axis=0)).sum()
+    assert to_slow < 0.5 * to_full
 
 
 def test_pbo_high_for_noise_low_for_real_winner():

@@ -19,7 +19,8 @@ from typing import Any
 import numpy as np
 
 from .eve_features import _csrank_norm
-from .eve_portfolio import Panel, topk_long_short_weights
+from .eve_portfolio import (Panel, aim_weights_from_scores, partial_adjust_path,
+                            topk_long_short_weights)
 
 
 class GBDTPredictor:
@@ -85,6 +86,32 @@ class GBDTTopK:
     def predict_weights(self, panel: Panel) -> np.ndarray:
         scores = self.predictor.predict_signal(panel)
         return topk_long_short_weights(scores, self.k, leverage=self.leverage)
+
+
+class GBDTPartialAdjust:
+    """GBDT signal -> Gârleanu-Pedersen partial-adjustment book (cost-aware, deterministic).
+
+    The robust, non-overfit answer to the turnover wall: track a continuous aim
+    portfolio built from the GBDT score, trading only ``rate`` of the gap each day.
+    Sweeping ``rate`` traces the optimal net-Sharpe frontier. No torch -> no
+    LightGBM/torch OpenMP conflict.
+    """
+
+    def __init__(self, *, rate: float = 0.2, leverage: float = 1.0,
+                 predictor_kwargs: dict | None = None):
+        self.rate = rate
+        self.leverage = leverage
+        self.name = f"gbdt_pa{int(round(rate * 100)):02d}"
+        self.predictor = GBDTPredictor(**(predictor_kwargs or {}))
+
+    def fit(self, panel: Panel) -> "GBDTPartialAdjust":
+        self.predictor.fit(panel)
+        return self
+
+    def predict_weights(self, panel: Panel) -> np.ndarray:
+        scores = self.predictor.predict_signal(panel)
+        aim = aim_weights_from_scores(scores, leverage=self.leverage)
+        return partial_adjust_path(aim, self.rate, panel.fwd_returns)
 
 
 class GBDTAllocator:
