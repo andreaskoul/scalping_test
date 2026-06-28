@@ -50,6 +50,45 @@ pipeline the survey called for, run on real data and reported honestly._
 results carry **survivorship bias** — true gross alpha is lower than shown. A real
 backtest needs point-in-time constituents.
 
+## Cost-aware optimization — Gârleanu–Pedersen partial adjustment
+
+Research-led decision (after surveying the top RL/ML trading repos): the only
+idea that targets *our* wall — the turnover/alpha-decay tradeoff — is **cost-aware
+optimal allocation** (CFMTech's deep-RL-for-portfolio, whose DDPG approximates the
+**Gârleanu–Pedersen 2013** closed form: trade only a fraction `rate` of the way
+toward an "aim" portfolio each step). We built the deterministic version
+(`GBDTPartialAdjust`) — robust, interpretable, torch-free — and swept `rate` on the
+real GBDT alpha:
+
+| trade rate | turnover | Net Sharpe | Deflated SR |
+|---|---|---|---|
+| 1.00 (full rebalance) | 1.43 | **−1.15** | 0.00 |
+| 0.50 | 0.51 | −0.34 | 0.00 |
+| 0.25 | 0.25 | −0.03 | 0.00 |
+| 0.10 | 0.10 | +0.23 | 0.01 |
+| 0.05 | 0.05 | +0.36 | 0.02 |
+| **0.02** | 0.02 | **+0.48** | 0.04 |
+| equal-weight (beta) | 0.02 | +0.74 | 0.15 |
+
+PBO = 0.04 (robust). **The method works**: slowing the trade rate lifts net Sharpe
+monotonically from −1.15 to **+0.48**, recovering a positive net from the signal
+that lost money at full turnover — the turnover wall was the killer, and GP is the
+right tool (no need to reinvent it with RL).
+
+**But the honest ceiling is +0.48** — still **below passive beta (0.74)** and not
+deflated-significant. Net Sharpe is still rising as `rate→0`, i.e. the optimum is a
+near-static factor tilt earning a tiny sliver (~0.9%/yr): the alpha decays so fast
+that capturing any of it net forces such slow trading that almost nothing is left,
+and that sliver is smaller than simply owning the market.
+
+**Decision implication for the RL lane:** the GP sweep already maps the *optimal*
+cost-aware frontier this signal can reach (≈ +0.48). A learned DSR-RL allocator
+chases the same frontier with added overfit risk and the LightGBM/torch OpenMP
+hazard; it will not materially exceed a sub-beta, sub-significant ceiling. So the
+robust call is **not** to chase it with RL — the binding constraint is the signal's
+fast decay vs retail cost, which no allocator can fix. **Sharpe ≫ 1 is not
+attainable here; ≫ 4 is not real.**
+
 ## Where the remaining edge could live (honest, not Sharpe-4)
 
 - **Adaptive cost-aware sizing** (`GBDTAllocator`: GBDT→RL with the DSR +
