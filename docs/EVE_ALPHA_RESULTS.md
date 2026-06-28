@@ -138,6 +138,56 @@ range honestly (still not 4), and the next gains are *correctness* (point-in-tim
 universe), *slower-decay features* (fundamentals via FMP — the #1 missing family), and
 a *recalibrated monthly DSR* — not a fancier model.
 
+## Follow-up levers — built (2026-06-28)
+
+After the monthly breakthrough we executed the three named follow-ups. Two are
+finished and runnable; the third's *capability* is built and tested, with the data
+pull deferred to an out-of-band cached batch (per-symbol FMP calls).
+
+1. **Deflated-Sharpe recalibrated for low frequency** — DONE. `portfolio_metrics`
+   was feeding each strategy's own |SR| as the cross-trial dispersion, which scales
+   with per-obs SR and so crushed the monthly DSR to ~0.03 despite t=3.8.
+   `walk_forward_portfolio` now computes `sr_std` once as the std of per-obs Sharpe
+   across the swept (non-baseline) configs and passes it through (Bailey-LdP). The
+   monthly `gbdt_pa05` DSR moves **0.03 → 0.91** — consistent with its t-stat, and
+   honestly *just* under the 0.95 gate (77 months, 9 trials). Daily results
+   unaffected.
+
+2. **Point-in-time universe — survivorship bias sized** — DONE (`eve_universe.py`).
+   Reconstructs S&P 500 membership on any date from FMP's historical change log
+   (walk backward from today's 503). Measured over our window:
+
+   | | count |
+   |---|---|
+   | TRUE distinct S&P members 2017–2026 | **680** |
+   | …we hold prices for | 502 |
+   | **missing (member, no price)** | **178 (~26%)** |
+
+   The 178 are exactly the names that *left* — ATVI (acquired), BBBY (bankrupt),
+   AET/AGN/ALXN (acquired)… disproportionately losers and takeouts. So our gross
+   alpha **and** the passive beta are both inflated. **Masking current prices by PIT
+   membership does not fix this** (we still lack those 178 series); the real fix is
+   ingesting delisted-name price history (FMP has it — an out-of-band per-symbol
+   batch). The mask + sizing tooling is in place for when those prices land.
+
+3. **Fundamentals (the #1 missing feature family)** — capability built + tested
+   (`eve_fundamentals.py`), full pull pending. Slow-decay value/quality/profitability
+   factors from FMP `key-metrics` (ROE, ROIC, earnings yield, FCF yield, EV/EBITDA,
+   current ratio, income quality, net-debt/EBITDA). Pure **PIT alignment with a
+   filing lag** (a quarter dated D is usable only at D+60d → month-end forward-fill →
+   cross-sectional rank-norm → appended to the price panel), validated against live
+   FMP data; cached per-symbol ingest (pull-once). The 472-symbol historical pull is
+   an out-of-band cached batch (each symbol is one FMP call), after which the monthly
+   GBDT+GP run augments automatically. *Why it should help:* fundamentals decay over
+   quarters, so they add alpha at the monthly horizon at near-zero extra turnover —
+   the same lever, deeper signal.
+
+**Data sourcing note (Alpaca vs FMP):** Alpaca provides market data + **news**, not
+fundamentals — so the fundamentals family must come from FMP (already reachable via
+the connected MCP, **no API key needed**). Alpaca's free historical **news** API
+(existing keys) is the natural source for the *next* family — news/earnings sentiment
+(FinBERT) — not for fundamentals.
+
 ## Where the remaining edge could live (honest, not Sharpe-4)
 
 - **Adaptive cost-aware sizing** (`GBDTAllocator`: GBDT→RL with the DSR +
