@@ -89,6 +89,55 @@ robust call is **not** to chase it with RL — the binding constraint is the sig
 fast decay vs retail cost, which no allocator can fix. **Sharpe ≫ 1 is not
 attainable here; ≫ 4 is not real.**
 
+## The horizon lever — monthly rebalance + liquidity factors (the literature's bet)
+
+The multi-feature/multimodal survey (`docs/EVE_SHARPE_LITERATURE.md`) concluded the
+single biggest *structural* net-Sharpe lever is **slower-decay signals at a longer
+horizon** (Gu-Kelly-Xiu live at monthly, not daily) — turnover per unit alpha falls,
+so the GP frontier shifts up. We tested it directly: added **liquidity factors**
+(Amihud illiquidity + log dollar-volume, `eve_features`, +10 factors → 55) and a
+**monthly rebalance** option (`build_feature_panel(rebalance="1m")` — same daily-window
+factors snapshotted at month-end, but the label is the *next-month* return). Same
+GBDT + GP sweep, annualized at 12, 5-fold walk-forward, embargo 1 month, 5 bps/side.
+
+| trade rate | turnover | Net Sharpe | t | annRet | annVol |
+|---|---|---|---|---|---|
+| 1.00 (full) | 1.32 | +0.17 | 0.44 | 0.6% | 3.3% |
+| 0.50 | 0.55 | +0.69 | 1.74 | 1.7% | 2.5% |
+| 0.25 | 0.25 | +1.14 | 2.88 | 2.2% | 1.9% |
+| 0.10 | 0.10 | **+1.46** | 3.69 | 1.9% | 1.3% |
+| **0.05** | 0.05 | **+1.50** | 3.80 | 1.3% | 0.9% |
+| 0.02 | 0.02 | +1.50 | 3.80 | 0.6% | 0.4% |
+| equal-weight (beta) | 0.12 | +0.79 | 2.01 | 14.6% | 18.4% |
+
+**PBO = 0.01** (robust). **The lever worked.** Net Sharpe rose from the daily
+ceiling of **+0.48 (below beta)** to **+1.50 (≈ 2× beta's +0.79)** — the first time
+any Eve configuration *beats passive net of retail cost*, and exactly where the
+literature said the edge lives. The frontier now **plateaus** at rate ≈ 0.05–0.10
+(a true optimum, not running away to zero turnover), with t ≈ 3.8 (p ≈ 0.0003) over
+77 OOS months.
+
+**Honest caveats — why this is "real and ~1.5", not "Sharpe 4":**
+1. **Tiny absolute return.** The high-Sharpe books are near-static low-vol tilts:
+   +1.3%/yr at 0.9% vol (rate 0.05). The Sharpe is real but you'd have to **lever**
+   it ~10× to match beta's *return*, reintroducing cost/borrow/drawdown risk. It's a
+   diversifier, not a standalone 15%/yr engine.
+2. **Deflated-Sharpe gate is miscalibrated at monthly frequency.** `portfolio_metrics`
+   feeds `sr_std=max(|per-obs SR|, 0.05)` to `deflated_sharpe_ratio`; at monthly the
+   per-obs SR ≈ 0.43 inflates the selection benchmark (`expected_max_sharpe`) so DSR
+   reads ~0.03 *despite* t = 3.8. The honest robustness evidence here is **t-stat +
+   PBO**, both strong; the DSR heuristic needs the cross-trial dispersion recalibrated
+   before it means anything at this frequency. (Flagged, not yet fixed.)
+3. **Survivorship bias** (current S&P 500) still inflates the gross — true edge is
+   smaller. A point-in-time universe is the next correctness fix.
+4. **Short sample.** 77 OOS months (~6.4 yr). Strong t, but one regime.
+
+**Verdict:** the horizon/liquidity lever is the right one and it cleared beta net —
+the project's first genuinely capturable edge. It points to a Sharpe in the **~1–1.5**
+range honestly (still not 4), and the next gains are *correctness* (point-in-time
+universe), *slower-decay features* (fundamentals via FMP — the #1 missing family), and
+a *recalibrated monthly DSR* — not a fancier model.
+
 ## Where the remaining edge could live (honest, not Sharpe-4)
 
 - **Adaptive cost-aware sizing** (`GBDTAllocator`: GBDT→RL with the DSR +

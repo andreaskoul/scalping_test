@@ -30,8 +30,9 @@ def _bars(sym="AAA", n=200, seed=0):
 def test_compute_features_shape_and_leakage():
     bars = _bars(n=200)
     dates, mat, names = compute_features(bars)
-    # 5 K-line + 8 rolling factors per window
-    assert len(names) == 5 + 8 * len(DEFAULT_WINDOWS)
+    # 5 K-line + 10 rolling factors per window (8 price/vol + dvol + amihud liquidity)
+    assert len(names) == 5 + 10 * len(DEFAULT_WINDOWS)
+    assert "dvol20" in names and "amihud20" in names
     assert mat.shape == (200, len(names))
     # Deepest window is 60 -> rows before that are not all-finite (leakage-safe).
     assert not np.isfinite(mat[10]).all()
@@ -65,9 +66,25 @@ def test_build_feature_panel_dense_and_ranknormed(tmp_path):
     lake = _write_lake(tmp_path, syms, n=160)
     panel = build_feature_panel(lake, syms, asset_class="equity", provider="yahoo", timeframe="1d")
     T, N, F = panel.signals.shape
-    assert N == 5 and F == 5 + 8 * len(DEFAULT_WINDOWS)
+    assert N == 5 and F == 5 + 10 * len(DEFAULT_WINDOWS)
     assert panel.fwd_returns.shape == (T, N)
     assert np.isfinite(panel.signals).all()           # dense, no NaN after assembly
     assert np.isfinite(panel.fwd_returns).all()
     # rank-normalized features live in [-0.5, 0.5]
     assert panel.signals.min() >= -0.5 - 1e-9 and panel.signals.max() <= 0.5 + 1e-9
+
+
+def test_monthly_rebalance_subsamples_to_month_ends(tmp_path):
+    syms = ["AAA", "BBB", "CCC", "DDD", "EEE"]
+    lake = _write_lake(tmp_path, syms, n=400)  # ~13 months of daily bars
+    daily = build_feature_panel(lake, syms, asset_class="equity", provider="yahoo",
+                                timeframe="1d", rebalance="1d")
+    monthly = build_feature_panel(lake, syms, asset_class="equity", provider="yahoo",
+                                  timeframe="1d", rebalance="1m")
+    # Far fewer rows (one per month, not per day) but same symbols/features.
+    assert monthly.signals.shape[0] < daily.signals.shape[0] / 10
+    assert monthly.signals.shape[1:] == daily.signals.shape[1:]
+    # Panel dates are unique month-ends (distinct YYYY-MM prefixes).
+    months = [d[:7] for d in monthly.dates]
+    assert len(months) == len(set(months))
+    assert np.isfinite(monthly.signals).all() and np.isfinite(monthly.fwd_returns).all()

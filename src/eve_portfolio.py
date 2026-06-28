@@ -389,6 +389,7 @@ def walk_forward_portfolio(
     min_train: int = 252,
     embargo: int = 0,
     seed: int = 0,
+    periods_per_year: float = TRADING_DAYS,
 ) -> PortfolioReport:
     """Anchored walk-forward: train past, evaluate next block, concatenate OOS.
 
@@ -425,7 +426,7 @@ def walk_forward_portfolio(
     n_trials = len(strategies)
     metrics = [
         portfolio_metrics(name, np.asarray(nets[name]), np.asarray(turns[name]),
-                          n_trials=n_trials, seed=seed)
+                          n_trials=n_trials, seed=seed, periods_per_year=periods_per_year)
         for name in strategies
     ]
     baseline_names = {"cash", "equal_weight", "long_short"}

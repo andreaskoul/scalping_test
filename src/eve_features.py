@@ -74,6 +74,7 @@ def compute_features(bars: Sequence[Any], windows: Sequence[int] = DEFAULT_WINDO
     r[1:] = c[1:] / (c[:-1] + _EPS) - 1.0
     gains = np.where(r > 0, r, 0.0)
     losses = np.where(r < 0, -r, 0.0)
+    dvol = c * v  # dollar volume — the liquidity base series (Amihud denominator)
 
     feats: dict[str, np.ndarray] = {}
     # K-line (intrabar) shape factors — no window.
@@ -99,6 +100,10 @@ def compute_features(bars: Sequence[Any], windows: Sequence[int] = DEFAULT_WINDO
         feats[f"vma{w}"] = _roll(v, w, lambda x: x.mean(1)) / (v + _EPS)
         feats[f"corr{w}"] = _roll_corr(c, v, w)
         feats[f"beta{w}"] = _roll_slope(c, w)
+        # Liquidity (Gu-Kelly-Xiu top-3 family): log mean dollar-volume + Amihud
+        # illiquidity (|return| per $ traded). Slow-decay, low-turnover signals.
+        feats[f"dvol{w}"] = np.log1p(_roll(dvol, w, lambda x: x.mean(1)))
+        feats[f"amihud{w}"] = _roll(np.abs(r) / (dvol + 1.0), w, lambda x: x.mean(1))
 
     names = list(feats.keys())
     mat = np.column_stack([feats[n] for n in names])
@@ -136,12 +141,20 @@ def build_feature_panel(
     windows: Sequence[int] = DEFAULT_WINDOWS,
     rank_normalize: bool = True,
     min_dates_frac: float = 0.9,
+    rebalance: str = "1d",
 ) -> Panel:
     """Assemble a cross-sectional factor panel from lake bars (leakage-safe).
 
     Only dates present for every symbol are kept (dense matrices). Each factor is
     rank-normalized across symbols at each date. ``fwd_returns[t, i]`` is the
     close-to-close return from the panel date t to the next panel date.
+
+    ``rebalance`` controls the holding/decision horizon. ``"1d"`` keeps every
+    common trading day (daily next-day labels). ``"1m"`` keeps only each month's
+    last common date, so ``fwd_returns`` is the *next-month* return and the panel
+    rebalances monthly — the slow-decay / low-turnover horizon the literature
+    (Gu-Kelly-Xiu) ties to capturable post-cost Sharpe. Features are still the
+    daily-window factors snapshotted at month-end (only the label horizon changes).
     """
     from .eve_data import read_symbol_bars
     from .eve_ingest import bars_dataset
@@ -175,6 +188,15 @@ def build_feature_panel(
     if len(syms) < 2 or names is None:
         raise ValueError("need >=2 symbols with enough history to build a feature panel")
     common = sorted(set.intersection(*[set(per_sym_feat[s][0]) for s in syms]))
+    if rebalance == "1m":
+        # Keep the last common date of each calendar month (common is sorted asc),
+        # so the panel rebalances monthly and fwd is the next month-end return.
+        by_month: dict[str, str] = {}
+        for d in common:
+            by_month[d[:7]] = d
+        common = sorted(by_month.values())
+    elif rebalance != "1d":
+        raise ValueError(f"unsupported rebalance {rebalance!r} (use '1d' or '1m')")
     if len(common) < 3:
         raise ValueError("not enough overlapping dates across symbols")
 
