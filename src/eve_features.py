@@ -312,5 +312,7 @@ def build_ragged_feature_panel(
             signals[:, :, k] = np.where(valid, col, np.nan)  # re-mask absent -> NaN
     else:
         signals = np.where(valid[:, :, None], np.nan_to_num(signals), np.nan)
-    return Panel(dates=months[:T], symbols=syms, signals=signals,
+    # Emit full ISO month-end dates ('YYYY-MM-28') so downstream date parsers
+    # (fundamentals PIT lag, sentiment) work; month identity is unchanged.
+    return Panel(dates=[m + "-28" for m in months[:T]], symbols=syms, signals=signals,
                  fwd_returns=fwd, valid=valid)
