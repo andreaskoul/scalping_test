@@ -85,6 +85,7 @@ class GBDTTopK:
 
     def predict_weights(self, panel: Panel) -> np.ndarray:
         scores = self.predictor.predict_signal(panel)
+        scores = np.where(panel.valid_mask(), scores, np.nan)  # absent names excluded
         return topk_long_short_weights(scores, self.k, leverage=self.leverage)
 
 
@@ -110,6 +111,7 @@ class GBDTPartialAdjust:
 
     def predict_weights(self, panel: Panel) -> np.ndarray:
         scores = self.predictor.predict_signal(panel)
+        scores = np.where(panel.valid_mask(), scores, np.nan)  # absent names excluded
         aim = aim_weights_from_scores(scores, leverage=self.leverage)
         return partial_adjust_path(aim, self.rate, panel.fwd_returns)
 

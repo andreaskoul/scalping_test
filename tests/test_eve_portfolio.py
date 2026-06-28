@@ -89,6 +89,22 @@ def test_topk_long_short_dollar_neutral():
     assert W[0, 0] > 0 and W[0, 2] > 0 and W[0, 5] < 0 and W[0, 3] < 0
 
 
+def test_topk_excludes_nan_scores():
+    # NaN = absent name in a ragged panel; it must never enter the book.
+    scores = np.array([[3.0, np.nan, 2.0, -1.0, np.nan, -2.0]])
+    W = topk_long_short_weights(scores, k=2, leverage=1.0)
+    assert W[0, 1] == 0.0 and W[0, 4] == 0.0          # NaN names get zero weight
+    assert abs(W[0].sum()) < 1e-9                       # still dollar neutral
+    assert np.abs(W[0]).sum() == pytest.approx(1.0)     # gross leverage among valid
+
+
+def test_aim_weights_zero_for_nan():
+    scores = np.array([[2.0, np.nan, -2.0, 0.0]])
+    aim = aim_weights_from_scores(scores, leverage=1.0)
+    assert aim[0, 1] == 0.0
+    assert abs(aim[0].sum()) < 1e-9
+
+
 def test_aim_weights_dollar_neutral_and_levered():
     scores = np.array([[2.0, -1.0, 0.5, -1.5], [1.0, 1.0, -1.0, -1.0]])
     aim = aim_weights_from_scores(scores, leverage=1.0)

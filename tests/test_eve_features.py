@@ -7,6 +7,7 @@ from src.eve_features import (
     DEFAULT_WINDOWS,
     _csrank_norm,
     build_feature_panel,
+    build_ragged_feature_panel,
     compute_features,
 )
 
@@ -72,6 +73,41 @@ def test_build_feature_panel_dense_and_ranknormed(tmp_path):
     assert np.isfinite(panel.fwd_returns).all()
     # rank-normalized features live in [-0.5, 0.5]
     assert panel.signals.min() >= -0.5 - 1e-9 and panel.signals.max() <= 0.5 + 1e-9
+
+
+def _delisted_dict_bars(n=180, seed=99):
+    rng = np.random.default_rng(seed)
+    from datetime import datetime, timedelta, timezone
+    t0 = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    price, r, out = 100.0, 0.0, []
+    for d in range(n):
+        r = 0.4 * r + rng.normal(0.0004, 0.012)
+        prev, price = price, price * (1 + r)
+        out.append({"ts": (t0 + timedelta(days=d)).strftime("%Y-%m-%d"),
+                    "open": prev, "high": max(prev, price) * 1.003,
+                    "low": min(prev, price) * 0.997, "close": price,
+                    "volume": 1e6})
+    return out
+
+
+def test_ragged_panel_includes_delisted_with_valid_mask(tmp_path):
+    syms = ["AAA", "BBB", "CCC", "DDD"]
+    lake = _write_lake(tmp_path, syms, n=400)          # ~13 months, all alive
+    dead = _delisted_dict_bars(n=180)                  # ~6 months then stops
+    panel = build_ragged_feature_panel(
+        lake, syms, {"DEAD": dead}, min_names=2)
+    assert panel.valid is not None
+    assert "DEAD" in panel.symbols
+    j = panel.symbols.index("DEAD")
+    # DEAD is valid early then goes absent; absent rows have NaN features.
+    assert panel.valid[:, j].any() and not panel.valid[:, j].all()
+    absent = ~panel.valid[:, j]
+    assert np.isnan(panel.signals[absent, j]).all()
+    # Where absent, fwd return is 0 (weight will be 0 there) and survivors stay valid.
+    assert (panel.fwd_returns[absent, j] == 0.0).all()
+    # Valid (present) entries have finite features.
+    pres = panel.valid[:, j]
+    assert np.isfinite(panel.signals[pres, j]).all()
 
 
 def test_monthly_rebalance_subsamples_to_month_ends(tmp_path):

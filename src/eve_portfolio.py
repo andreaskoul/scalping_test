@@ -86,10 +86,17 @@ class Panel:
     symbols: list[str]
     signals: np.ndarray      # (T, N, F)
     fwd_returns: np.ndarray  # (T, N)
+    valid: np.ndarray | None = None  # (T, N) bool; None = every name tradable every date
 
     @property
     def n_features(self) -> int:
         return self.signals.shape[2]
+
+    def valid_mask(self) -> np.ndarray:
+        """(T, N) bool tradability mask — all-True when ``valid`` is unset (dense panel)."""
+        if self.valid is not None:
+            return self.valid
+        return np.ones(self.fwd_returns.shape, dtype=bool)
 
 
 def _zscore_cross_section(x: np.ndarray) -> np.ndarray:
@@ -213,15 +220,20 @@ def topk_long_short_weights(scores: np.ndarray, k: int, *, leverage: float = 1.0
     """Dollar-neutral book: long the top-k by score, short the bottom-k.
 
     qlib's TopkDropout family. ``scores`` is (T, N); gross leverage is normalized
-    to ``leverage`` and the book is dollar-neutral.
+    to ``leverage`` and the book is dollar-neutral. **NaN scores are excluded** from
+    ranking (rank only among tradable names), so a ragged panel marks absent names
+    with NaN and they never enter the book.
     """
     T, N = scores.shape
-    k = max(1, min(k, N // 2))
     W = np.zeros((T, N))
     for t in range(T):
-        order = np.argsort(scores[t])
-        W[t, order[-k:]] = 1.0
-        W[t, order[:k]] = -1.0
+        idx = np.where(np.isfinite(scores[t]))[0]
+        if idx.size < 2:
+            continue
+        kk = max(1, min(k, idx.size // 2))
+        order = idx[np.argsort(scores[t, idx])]
+        W[t, order[-kk:]] = 1.0
+        W[t, order[:kk]] = -1.0
         gross = np.abs(W[t]).sum()
         if gross > 0:
             W[t] *= leverage / gross
@@ -233,9 +245,12 @@ def aim_weights_from_scores(scores: np.ndarray, *, leverage: float = 1.0) -> np.
 
     The Gârleanu-Pedersen aim portfolio: weight each name by its de-meaned score,
     scaled to gross leverage. Smoother than a discrete top-k cutoff, which is what
-    partial adjustment wants to track.
+    partial adjustment wants to track. **NaN scores** (absent names in a ragged
+    panel) are de-meaned out and get zero weight.
     """
-    s = scores - scores.mean(axis=1, keepdims=True)
+    mu = np.nanmean(np.where(np.isfinite(scores), scores, np.nan), axis=1, keepdims=True)
+    mu = np.nan_to_num(mu, nan=0.0)
+    s = np.where(np.isfinite(scores), scores - mu, 0.0)
     denom = np.abs(s).sum(axis=1, keepdims=True) + 1e-12
     return leverage * s / denom
 
@@ -385,7 +400,9 @@ class PortfolioReport:
 # A strategy is either a callable(panel)->weights (baselines) or a fittable
 # allocator exposing fit(train_panel) and predict_weights(test_panel).
 def _slice_panel(panel: Panel, lo: int, hi: int) -> Panel:
-    return Panel(panel.dates[lo:hi], panel.symbols, panel.signals[lo:hi], panel.fwd_returns[lo:hi])
+    valid = panel.valid[lo:hi] if panel.valid is not None else None
+    return Panel(panel.dates[lo:hi], panel.symbols, panel.signals[lo:hi],
+                 panel.fwd_returns[lo:hi], valid)
 
 
 def walk_forward_portfolio(

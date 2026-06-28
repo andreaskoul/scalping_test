@@ -216,3 +216,101 @@ def build_feature_panel(
             signals[:, :, k] = _csrank_norm(signals[:, :, k])
 
     return Panel(dates=common[:T], symbols=syms, signals=signals, fwd_returns=fwd)
+
+
+class _DictBar:
+    """Lightweight bar wrapper so FMP dicts feed compute_features like AlpacaBars."""
+    __slots__ = ("ts", "open", "high", "low", "close", "volume")
+
+    def __init__(self, d: dict):
+        self.ts = d["ts"]
+        self.open = float(d["open"]); self.high = float(d["high"])
+        self.low = float(d["low"]); self.close = float(d["close"])
+        self.volume = float(d.get("volume", 0.0) or 0.0)
+
+
+def build_ragged_feature_panel(
+    lake: Any,
+    current_symbols: Sequence[str],
+    delisted_bars: dict[str, Sequence[dict]],
+    *,
+    asset_class: str = "equity",
+    provider: str = "yahoo",
+    timeframe: str = "1d",
+    windows: Sequence[int] = DEFAULT_WINDOWS,
+    rank_normalize: bool = True,
+    min_names: int = 30,
+) -> Panel:
+    """Survivorship-corrected MONTHLY panel over a *ragged* universe.
+
+    Combines current names (from the lake) with delisted names (FMP EOD bar dicts,
+    ``{ts,open,high,low,close,volume}``) whose lifespans differ. Instead of a dense
+    common-date intersection (which would drop every dropped name), it aligns each
+    symbol to its own month-end snapshots on a **union monthly calendar**, marks
+    months where a name is not trading as NaN features (excluded from GBDT training)
+    with a ``valid`` mask, and sets ``fwd_returns`` to next-month return where valid
+    else 0. This is the only leak-safe way to include bankrupt/acquired names —
+    closing the survivorship hole `eve_universe` quantified.
+    """
+    from .eve_data import read_symbol_bars
+    from .eve_ingest import bars_dataset
+
+    # Per-symbol month-end feature row + close, keyed by 'YYYY-MM'.
+    per_sym: dict[str, tuple[dict[str, np.ndarray], dict[str, float]]] = {}
+    names: list[str] | None = None
+    sources = [(s.upper(), None) for s in current_symbols] + \
+              [(s.upper(), delisted_bars[s]) for s in delisted_bars]
+    for sym, fmp in sources:
+        if fmp is None:
+            bars = read_symbol_bars(lake, provider=provider, asset_class=asset_class,
+                                    symbol=sym, dataset=bars_dataset(timeframe))
+        else:
+            bars = [_DictBar(d) for d in fmp]
+        if len(bars) <= max(windows) + 2:
+            continue
+        dates, mat, nm = compute_features(bars, windows)
+        names = nm
+        feat_by_month: dict[str, np.ndarray] = {}
+        close_by_month: dict[str, float] = {}
+        closes = {b.ts[:10]: float(b.close) for b in bars}
+        for i in range(len(dates)):
+            if not np.isfinite(mat[i]).all():
+                continue
+            m = dates[i][:7]
+            feat_by_month[m] = mat[i]          # last valid row in the month wins
+            close_by_month[m] = closes[dates[i]]
+        if feat_by_month:
+            per_sym[sym] = (feat_by_month, close_by_month)
+
+    if not per_sym or names is None:
+        raise ValueError("no symbols with enough history for a ragged panel")
+    syms = sorted(per_sym)
+    # Union monthly calendar, keeping months with >= min_names valid symbols.
+    month_count: dict[str, int] = {}
+    for fbm, _ in per_sym.values():
+        for m in fbm:
+            month_count[m] = month_count.get(m, 0) + 1
+    months = sorted(m for m, c in month_count.items() if c >= min_names)
+    if len(months) < 3:
+        raise ValueError("ragged calendar too short")
+    T, N, F = len(months) - 1, len(syms), len(names)
+    signals = np.full((T, N, F), np.nan)
+    fwd = np.zeros((T, N))
+    valid = np.zeros((T, N), dtype=bool)
+    for j, sym in enumerate(syms):
+        fbm, cbm = per_sym[sym]
+        for t in range(T):
+            m, mn = months[t], months[t + 1]
+            if m in fbm:
+                signals[t, j] = fbm[m]
+                if m in cbm and mn in cbm:
+                    fwd[t, j] = cbm[mn] / (cbm[m] + _EPS) - 1.0
+                    valid[t, j] = True
+    if rank_normalize:
+        for k in range(F):
+            col = _csrank_norm(signals[:, :, k])    # fills NaN -> mid-rank
+            signals[:, :, k] = np.where(valid, col, np.nan)  # re-mask absent -> NaN
+    else:
+        signals = np.where(valid[:, :, None], np.nan_to_num(signals), np.nan)
+    return Panel(dates=months[:T], symbols=syms, signals=signals,
+                 fwd_returns=fwd, valid=valid)
