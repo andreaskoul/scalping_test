@@ -183,10 +183,37 @@ pull deferred to an out-of-band cached batch (per-symbol FMP calls).
    the same lever, deeper signal.
 
 **Data sourcing note (Alpaca vs FMP):** Alpaca provides market data + **news**, not
-fundamentals — so the fundamentals family must come from FMP (already reachable via
-the connected MCP, **no API key needed**). Alpaca's free historical **news** API
-(existing keys) is the natural source for the *next* family — news/earnings sentiment
-(FinBERT) — not for fundamentals.
+fundamentals — so the fundamentals family must come from FMP. Pulled full-universe via
+FMP HTTP (`eve_fmp.py`, `FMP_API_KEY` in `.env`) — 471/472 symbols, ~6 min, cached.
+
+### Fundamentals result — a robust NEGATIVE on the current universe (2026-06-28)
+
+Pulled FMP key-metrics for all 472 names, PIT-aligned (60-day filing lag), appended
+the 10 value/quality/profitability factors, re-ran the monthly GBDT+GP frontier:
+
+| variant | best net Sharpe | DSR | PBO |
+|---|---|---|---|
+| **price-only (std GBDT)** | **+1.50** | 0.95 | 0.02 |
+| price-only (regularized) | +1.42 | 0.92 | 0.01 |
+| price + 3 core fundamentals (std) | +1.16 | 0.90 | 0.15 |
+| price + 3 core fundamentals (reg) | +1.10 | 0.88 | 0.23 |
+| price + 10 fundamentals (std) | +0.84 | 0.81 | 0.30 |
+| price + 10 fundamentals (reg) | +0.77 | 0.88 | 0.53 |
+
+**Adding fundamentals consistently *hurt* (−0.34 to −0.73) and raised PBO** — feature
+selection (3 core) and regularization both fail to recover. So on the **current S&P
+universe**, fundamentals carry no monthly cross-sectional alpha beyond price+liquidity;
+they only add overfit surface. This *contradicts* the naive Gu-Kelly-Xiu read, and the
+most likely reason is our own measured **survivorship bias**: value/quality/distress
+signal lives disproportionately in the names that *left* (bankruptcies, takeouts — the
+178 missing), so on surviving large-caps the fundamental spread is compressed. **The
+delisted-price ingest is therefore the principled unlock** — it gives fundamentals a
+fair universe *and* de-inflates the passive beta. Honest discipline win: PBO caught the
+overfit before we believed a fundamentals story.
+
+### News/sentiment — leak-safe SESTM lane built; backtest pending full ingest
+`eve_news.py` (see `docs/EVE_SHARPE_LITERATURE.md` news section). Alpaca news ingest
+running; price-only vs +sentiment delta reported on completion.
 
 ## Where the remaining edge could live (honest, not Sharpe-4)
 
