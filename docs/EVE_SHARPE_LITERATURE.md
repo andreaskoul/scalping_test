@@ -108,3 +108,62 @@ tutorial-grade and predict price *levels*, not cost-aware tradable edge.
 ranking labels → GBDT vs transformer under our post-cost harness;
 (b) only then richer features; (c) microstructure features require an L2 source
 (Adam already has Polymarket L2; equities L2 would need a venue feed).
+
+---
+
+## News / text features — does "embedded headlines" improve OOS? (2026-06-28 survey)
+
+Extensive sweep (arXiv, NBER/SSRN, HuggingFace, JFE/RFS) on using news headlines
+as return-prediction features, focused on *post-cost, out-of-sample, cross-sectional*
+evidence — not accuracy/F1.
+
+**The credible benchmark — Ke-Kelly-Xiu, "Predicting Returns with Text Data"
+(SESTM, NBER w26186 / JFE).** A *supervised* sentiment score learned for return
+prediction (screen sentiment words → topic-model weights → penalized aggregation),
+not an off-the-shelf dictionary. Net-of-cost equal-weight Sharpe **4.0 weekly, 1.5
+monthly, 0.9 quarterly** — decays steeply with horizon. At our **monthly** horizon
+the honest, post-cost, cross-sectional number is **~1.5**.
+
+**The feature-quality ranking (consistent across OOS studies):**
+embeddings > FinBERT > LLM-sentiment > **Loughran-McDonald lexicon (worst)**. The LM
+dictionary is repeatedly "least predictive"; FinBERT "significantly improves"; neural
+embeddings "largely outperform" LLM-sentiment. (Sentiment-trading-with-LLMs
+2412.19245; News Sentiment Embeddings 2507.01970.) **Implication: a lexicon is the
+wrong tool; a *learned* score is the right one.**
+
+**The high embedding Sharpes (3.3-5.5) are not comparable / are leakage-suspect.**
+They are mostly gross, index-level (SPY), short-horizon, or preliminary. More
+importantly:
+
+**LOOK-AHEAD BIAS is the decisive trap (2025-26).** A Test of Lookahead Bias in LLM
+Forecasts (2512.23847), MemGuard-Alpha (2603.26797), Do LLMs Understand Chronology
+(2511.14214): embedding a *historical* headline with a model trained on data that
+**includes the future** lets the embedding encode what happened *after* the headline
+→ fake OOS predictability. Prompt-engineering and identifier-masking do **not**
+remove the structural contamination. This is our `validation-discipline` ("extreme
+Sharpe = leakage hunt") in textbook form — OpenAI text-embedding-3 / recent FinBERT
+on a 2017-26 backtest is a leakage machine.
+
+**The real economic mechanism = post-news drift / underreaction** (Chan 2003 "Drift
+and Reversal after Headlines"; Tetlock 2007): news predicts cross-sectional returns
+over weeks-to-months because investors underreact — strongest after *bad* news and
+in *small, illiquid* stocks. Honest caveat: the edge is largest exactly where
+trading cost is highest.
+
+### Decision for Eve's news lane
+1. **Primary = SESTM-style supervised sentiment**, learned **in-fold on training data
+   only** (no pretrained future-knowledge) → leak-safe by construction, fits our
+   anchored walk-forward (refit dictionary each fold), and is the method with the
+   credible **post-cost monthly ~1.5**. Source = Alpaca news (headlines + ts +
+   symbols, free with our keys).
+2. **Pretrained embeddings (FinBERT) = guarded later experiment only**, with a
+   pre-cutoff model + a placebo date-shuffle leakage test; treat any monthly Sharpe
+   >> 1.5 as a leakage alarm, not a win.
+3. **Honest expectation:** a modest, complementary lift on top of momentum + liquidity
+   + fundamentals — toward ~1.5 monthly net, concentrated in harder-to-trade names —
+   not Sharpe 4.
+
+Key sources: KKX/SESTM (nber.org/papers/w26186); News Sentiment Embeddings
+(arxiv 2507.01970); Sentiment trading with LLMs (2412.19245); Lookahead-bias tests
+(2512.23847, 2603.26797, 2511.14214); Chan (2003) drift after headlines;
+Lopez-Lira & Tang (2304.07619).
