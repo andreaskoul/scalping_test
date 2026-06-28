@@ -63,6 +63,7 @@ def fetch_news(
     per_symbol: bool = True,
     sleep: float = 0.0,
     refresh: bool = False,
+    max_pages: int = 200,
 ) -> dict[str, list[dict]]:
     """Fetch Alpaca news for ``symbols`` over [start, end), caching each symbol once.
 
@@ -78,7 +79,8 @@ def fetch_news(
         if fp.exists() and not refresh:
             out[sym.upper()] = json.loads(fp.read_text())
             continue
-        arts = _fetch_symbol_news(sym, start, end, key=key, secret=secret, sleep=sleep)
+        arts = _fetch_symbol_news(sym, start, end, key=key, secret=secret,
+                                  sleep=sleep, max_pages=max_pages)
         fp.write_text(json.dumps(arts))
         out[sym.upper()] = arts
     return out
