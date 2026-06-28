@@ -315,6 +315,7 @@ class PortfolioMetrics:
 def portfolio_metrics(
     name: str, net_returns: np.ndarray, turnover: np.ndarray | None = None,
     *, n_trials: int = 1, periods_per_year: float = TRADING_DAYS, seed: int = 0,
+    sr_std: float | None = None,
 ) -> PortfolioMetrics:
     r = np.asarray(net_returns, dtype=float)
     r = r[np.isfinite(r)]
@@ -324,8 +325,15 @@ def portfolio_metrics(
     daily_sr = _stats.per_obs_sharpe(r)
     ann_sr = daily_sr * math.sqrt(periods_per_year)
     ci = _stats.block_bootstrap_ci(r, seed=seed)
+    # Deflation hurdle (Bailey-LdP): the benchmark is E[max SR] across trials, which
+    # needs the *cross-trial Sharpe dispersion*. When the caller supplies it
+    # (`sr_std`, computed once across the swept configs) we use it; otherwise fall
+    # back to a per-strategy heuristic. The heuristic scales with |SR|, so at low
+    # frequency (monthly, per-obs SR large) it spuriously crushes the DSR — passing
+    # the true dispersion is what makes the gate frequency-robust.
+    sr_disp = sr_std if (sr_std is not None and sr_std > 0) else max(abs(daily_sr), 0.05)
     dsr = _stats.deflated_sharpe_ratio(
-        daily_sr, n_trials=max(1, n_trials), n_obs=n, sr_std=max(abs(daily_sr), 0.05)
+        daily_sr, n_trials=max(1, n_trials), n_obs=n, sr_std=sr_disp
     )
     return PortfolioMetrics(
         name=name, n=n,
@@ -424,12 +432,19 @@ def walk_forward_portfolio(
                 turns[name].extend(_turnover_series(W, test.fwd_returns).tolist())
 
     n_trials = len(strategies)
+    baseline_names = {"cash", "equal_weight", "long_short"}
+    # Cross-trial Sharpe dispersion for the deflation hurdle: std of per-obs Sharpe
+    # across the *swept* (non-baseline) configs we select the max over. Frequency-
+    # robust, unlike the |SR|-scaled per-strategy fallback.
+    swept_srs = [_stats.per_obs_sharpe(np.asarray(nets[name]))
+                 for name in strategies if name not in baseline_names and len(nets[name]) > 1]
+    sr_std = float(np.std(swept_srs, ddof=1)) if len(swept_srs) >= 2 else None
     metrics = [
         portfolio_metrics(name, np.asarray(nets[name]), np.asarray(turns[name]),
-                          n_trials=n_trials, seed=seed, periods_per_year=periods_per_year)
+                          n_trials=n_trials, seed=seed, periods_per_year=periods_per_year,
+                          sr_std=sr_std)
         for name in strategies
     ]
-    baseline_names = {"cash", "equal_weight", "long_short"}
     base_sr = max((m.sharpe for m in metrics if m.name in baseline_names), default=0.0)
     learned = [m for m in metrics if m.name not in baseline_names and m.n > 0]
     best = max(learned, key=lambda m: m.sharpe) if learned else max(metrics, key=lambda m: m.sharpe)
