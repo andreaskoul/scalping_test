@@ -6,6 +6,7 @@ model_weights.json
 wedge_coeffs.json
 calib_coeffs.json
 *.pyc
+*.gz
 __pycache__/
 .pytest_cache/
 dist/

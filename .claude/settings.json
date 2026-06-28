@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/bin/python -c \"import sys; v=[float\\(x\\) for x in sys.stdin]; n=len\\(v\\); print\\(f'n={n} min={min\\(v\\):.4f} median={v[n//2]:.4f} max={max\\(v\\):.4f} mean={sum\\(v\\)/n:.4f}'\\) if v else print\\('none'\\)\")",
+      "Bash(.venv/bin/python -c ' *)",
+      "WebSearch",
+      "Bash(.venv/bin/python -m pytest tests/test_arb_robustness.py tests/test_arbitrage.py -q)",
+      "Bash(.venv/bin/python -m pytest -q)",
+      "Bash(.venv/bin/python -m src.arb_replay poly_events/strict-hybrid-20260622T104942Z --db decisions_strict_v2.db --min-credit 0.0)",
+      "Bash(.venv/bin/python -m src.arb_replay poly_events/strict-hybrid-20260622T104942Z --db decisions_strict_v2.db --min-credit 0.01)",
+      "Bash(.venv/bin/python -)",
+      "Bash(.venv/bin/python -m src.arb_replay poly_events/strict-hybrid-20260622T104942Z --db decisions_strict_v2.db)",
+      "Bash(.venv/bin/python -m src.arb_replay poly_events/signal-capture-20260625 --db decisions_capture.db)",
+      "Bash(git add *)",
+      "Bash(git commit -q -m 'Arbitrage robustness: kill phantom rebalance, dedup arbs, freshness gate + replay validator *)",
+      "Bash(echo \"exit=$?\")"
+    ]
+  }
+}

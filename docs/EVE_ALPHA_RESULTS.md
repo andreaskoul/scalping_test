@@ -211,9 +211,71 @@ delisted-price ingest is therefore the principled unlock** — it gives fundamen
 fair universe *and* de-inflates the passive beta. Honest discipline win: PBO caught the
 overfit before we believed a fundamentals story.
 
-### News/sentiment — leak-safe SESTM lane built; backtest pending full ingest
-`eve_news.py` (see `docs/EVE_SHARPE_LITERATURE.md` news section). Alpaca news ingest
-running; price-only vs +sentiment delta reported on completion.
+### Survivorship-corrected re-test — the +1.50 was largely an artifact (2026-06-28)
+
+Recovered 197/209 dropped names' EOD prices via FMP (`eve_fmp.fetch_eod_bars`) and
+built a **ragged** monthly panel (`build_ragged_feature_panel`: union calendar, per-name
+lifespans, `Panel.valid` mask, NaN-aware weighting) over the true universe — **669
+names, 2016-2026, avg 610 tradable/month**. Re-ran the monthly GBDT+GP frontier:
+
+| universe | price-only best | +fundamentals best | fund Δ | beta | PBO price / +fund |
+|---|---|---|---|---|---|
+| survivor-only (472) | **+1.50** | +0.84 | −0.66 | +0.79 | 0.02 / 0.30 |
+| **survivorship-corrected (669)** | **+0.30** | +0.83 | **+0.50** | +0.76 | 0.90 / 0.60 |
+
+**Finding 1 — the monthly "breakthrough" was mostly survivorship.** Adding the
+bankrupt/acquired names back collapses price-only from +1.50 to **+0.30 with PBO 0.90**
+(not robust). Momentum/reversal is precisely the signal family survivor-only universes
+inflate; the apparent +1.50 did not survive an honest universe.
+
+**Finding 2 — fundamentals flip from harmful to helpful once survivorship is fixed.**
+The fundamentals delta goes **−0.66 (survivors) → +0.50 (corrected)**, lifting the book
+to +0.83 — vindicating both Gu-Kelly-Xiu and the hypothesis that value/quality/distress
+alpha lives in the names that *left*. But +0.83 ≈ beta (0.76), DSR 0.92 (< 0.95 gate),
+PBO 0.60 (> 0.5) — **directionally real, not a certified edge.**
+
+**Verdict (honest):** on a survivorship-corrected universe, no monthly configuration yet
+clears beta robustly. The session's levers each taught something real — horizon helps,
+fundamentals matter *only* once survivorship is fixed, and PBO/survivorship correction
+repeatedly deflate apparent edges — but **robust net Sharpe ≫ beta remains unproven; ≫ 4
+is not real.** Next: the leak-safe news/sentiment factor (ingest finishing) on the
+corrected universe; tighter regularization given PBO; and a longer/point-in-time-clean
+sample.
+
+### News/sentiment — leak-safe SESTM lane: modest negative on survivors (2026-06-28)
+
+Ingested Alpaca news for all 503 names (472/472 panel coverage), built the leak-safe
+SESTM factor (`eve_news.py`: word-screening refit in-fold on past articles only,
+expanding-window monthly score), appended it, re-ran the survivor-only monthly frontier:
+
+| variant | best net Sharpe | DSR | PBO |
+|---|---|---|---|
+| price-only | +1.50 | 0.95 | 0.02 |
+| price + sentiment | +1.40 | 0.91 | 0.06 |
+
+**Sentiment delta = −0.10** — neutral-to-slightly-negative. Consistent with the
+literature: post-news drift is a *small* monthly effect concentrated in distressed /
+illiquid names. The natural place it *might* help is the survivorship-corrected universe
+(bad-news drift lives in the bankrupt/acquired names) — but our news ingest covered only
+current names, so the dropped names get neutral sentiment. Testing that properly needs a
+delisted-name news ingest (follow-up). On the survivor universe it adds no robust signal.
+
+## Session synthesis (2026-06-28) — every lever, honestly
+
+| lever | effect | verdict |
+|---|---|---|
+| Monthly horizon + liquidity | survivor-only +0.48→+1.50 | **mostly survivorship artifact** |
+| Deflated-Sharpe recal (monthly) | DSR 0.03→0.91 | infra fix, correct now |
+| **Survivorship correction** (669 names) | price-only +1.50→**+0.30** (PBO 0.90) | the +1.50 did not survive |
+| Fundamentals | survivors −0.66 → corrected **+0.50** | helps *only* once survivorship fixed; still ≈ beta |
+| News sentiment (leak-safe) | −0.10 (survivors) | modest, untested on corrected universe |
+
+**Bottom line:** after an honest universe + proper deflation, **no monthly configuration
+clears beta robustly** (best corrected ≈ +0.83 ≈ beta 0.76, PBO 0.60). Each lever taught
+something real — horizon matters, fundamentals matter once survivorship is fixed, news is
+weak at monthly large-cap — but **robust net Sharpe ≫ beta remains unproven, and ≫ 4 is
+not real.** The wall is still signal-vs-cost and now also **survivorship**; the model was
+never the bottleneck.
 
 ## Where the remaining edge could live (honest, not Sharpe-4)
 
